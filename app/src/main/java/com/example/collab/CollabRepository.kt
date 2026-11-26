@@ -562,6 +562,10 @@ class CollabRepository(
         }
 
         fun getConfiguredFirestore(context: Context): FirebaseFirestore {
+           return FirebaseFirestore.getInstance()
+        }
+
+        /* fun getConfiguredFirestore(context: Context): FirebaseFirestore {
             val dbId = resolveConfiguredDatabaseId(context)
             return if (dbId == DEFAULT_DATABASE_ID || dbId.isBlank()) {
                 FirebaseFirestore.getInstance()
@@ -569,6 +573,8 @@ class CollabRepository(
                 FirebaseFirestore.getInstance(dbId)
             }
         }
+        */
+        
 
         fun extractInviteCode(raw: String): String? {
             val trimmed = raw.trim().uppercase()
