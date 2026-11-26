@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">TripBuddy</string>
+    <string name="tab_home">Beranda</string>
+    <string name="tab_calendar">Kalender</string>
+    <string name="tab_memories">Kenangan</string>
+    <string name="cd_hero_coastal">Ilustrasi pantai dan perahu layar TripBuddy</string>
+    <string name="cd_memories_empty">Ilustrasi buku catatan kenangan perjalanan</string>
+    <string name="cd_open_maps">Buka pencarian Google Maps</string>
+    <string name="cd_voice_search">Cari dengan suara</string>
+    <string name="cd_add_location">Tambah lokasi kunjungan</string>
+    <string name="cd_prev_month">Bulan sebelumnya</string>
+    <string name="cd_next_month">Bulan berikutnya</string>
+    <string name="cd_mark_visited">Tandai sudah dikunjungi</string>
+    <string name="cd_edit_memory_note">Ubah catatan kenangan</string>
+    <string name="cd_delete_location">Hapus lokasi</string>
+    <string name="notification_channel_name">Pengingat Perjalanan</string>
+    <string name="notification_channel_desc">Notifikasi pengingat jadwal lokasi kunjungan TripBuddy</string>
+    <string name="test_notification_button">Tes notifikasi</string>
+</resources>

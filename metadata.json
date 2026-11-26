@@ -1,0 +1,6 @@
+{
+  "name": "TripBuddy",
+  "description": "Aplikasi perencanaan travel berbahasa Indonesia dengan kalender bulanan, hitung mundur trip terdekat, pencarian Google Maps suara, dan daftar kenangan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

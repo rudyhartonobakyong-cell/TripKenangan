@@ -1,0 +1,106 @@
+{
+  "entities": {
+    "SharedTrip": {
+      "title": "SharedTrip",
+      "description": "Perjalanan kolaboratif yang dapat diakses bersama oleh beberapa anggota.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "Nama trip bersama (1-80 karakter)." },
+        "ownerId": { "type": "string", "description": "UID pembuat trip." },
+        "inviteCode": { "type": "string", "description": "Kode undangan 6 karakter huruf besar/angka." },
+        "memberUids": { "type": "array", "description": "Daftar UID anggota trip (maks 50)." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp pembuatan." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp pembaruan." }
+      },
+      "required": ["title", "ownerId", "inviteCode", "memberUids", "createdAt", "updatedAt"]
+    },
+    "TripInvite": {
+      "title": "TripInvite",
+      "description": "Peta kode undangan 6 karakter ke ID trip terkait.",
+      "type": "object",
+      "properties": {
+        "tripId": { "type": "string", "description": "ID dokumen trip tujuan." },
+        "tripTitle": { "type": "string", "description": "Judul trip." },
+        "ownerId": { "type": "string", "description": "UID pembuat undangan." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp pembuatan." }
+      },
+      "required": ["tripId", "tripTitle", "ownerId", "createdAt"]
+    },
+    "TripMember": {
+      "title": "TripMember",
+      "description": "Profil anggota yang tergabung dalam trip bersama.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "UID pengguna Firebase Auth." },
+        "displayName": { "type": "string", "description": "Nama tampilan anggota." },
+        "photoUrl": { "type": "string", "description": "URL foto profil Google anggota." },
+        "role": { "type": "string", "enum": ["owner", "member"], "description": "Peran anggota." },
+        "inviteCodeUsed": { "type": "string", "description": "Kode undangan 6 karakter saat bergabung (kosong untuk owner)." },
+        "joinedAt": { "type": "string", "format": "date-time", "description": "Server timestamp bergabung." }
+      },
+      "required": ["uid", "displayName", "photoUrl", "role", "inviteCodeUsed", "joinedAt"]
+    },
+    "SharedVisit": {
+      "title": "SharedVisit",
+      "description": "Lokasi kunjungan pada tanggal tertentu dalam trip bersama.",
+      "type": "object",
+      "properties": {
+        "tripId": { "type": "string", "description": "ID trip induk." },
+        "locationName": { "type": "string", "description": "Nama lokasi tujuan." },
+        "tripTitle": { "type": "string", "description": "Sub-kategori atau judul kegiatan." },
+        "visitDateEpochDay": { "type": "integer", "description": "Tanggal kunjungan dalam epoch day." },
+        "visitHour": { "type": "integer", "description": "Jam kunjungan (0-23)." },
+        "visitMinute": { "type": "integer", "description": "Menit kunjungan (0-59)." },
+        "planNotes": { "type": "string", "description": "Catatan rencana." },
+        "memoryNotes": { "type": "string", "description": "Catatan kenangan." },
+        "completedManually": { "type": "boolean", "description": "Status selesai manual." },
+        "createdByUid": { "type": "string", "description": "UID pembuat kunjungan." },
+        "createdByName": { "type": "string", "description": "Nama pembuat kunjungan." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp pembuatan." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp pembaruan." }
+      },
+      "required": [
+        "tripId", "locationName", "tripTitle", "visitDateEpochDay",
+        "visitHour", "visitMinute", "planNotes", "memoryNotes",
+        "completedManually", "createdByUid", "createdByName", "createdAt", "updatedAt"
+      ]
+    },
+    "TripDateComment": {
+      "title": "TripDateComment",
+      "description": "Komentar singkat anggota pada tanggal tertentu dalam trip bersama.",
+      "type": "object",
+      "properties": {
+        "tripId": { "type": "string", "description": "ID trip induk." },
+        "dateEpochDay": { "type": "integer", "description": "Tanggal yang dikomentari." },
+        "authorUid": { "type": "string", "description": "UID penulis komentar." },
+        "authorName": { "type": "string", "description": "Nama penulis komentar." },
+        "authorPhotoUrl": { "type": "string", "description": "URL foto penulis komentar." },
+        "text": { "type": "string", "description": "Isi pesan komentar (1-500 karakter)." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp pengiriman." }
+      },
+      "required": ["tripId", "dateEpochDay", "authorUid", "authorName", "authorPhotoUrl", "text", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/trips/{tripId}": {
+      "schema": { "$ref": "#/entities/SharedTrip" },
+      "description": "Dokumen utama trip bersama berisi daftar memberUids dan inviteCode."
+    },
+    "/trip_invites/{inviteCode}": {
+      "schema": { "$ref": "#/entities/TripInvite" },
+      "description": "Lookup undangan 6 karakter untuk bergabung ke trip bersama."
+    },
+    "/trips/{tripId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/TripMember" },
+      "description": "Daftar anggota trip beserta nama dan foto profil Google."
+    },
+    "/trips/{tripId}/visits/{visitId}": {
+      "schema": { "$ref": "#/entities/SharedVisit" },
+      "description": "Daftar lokasi kunjungan yang tersinkron untuk semua anggota trip."
+    },
+    "/trips/{tripId}/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/TripDateComment" },
+      "description": "Chat komentar anggota per tanggal pada trip bersama."
+    }
+  }
+}
