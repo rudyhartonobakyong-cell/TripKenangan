@@ -1,12 +1,14 @@
 package com.example.ui
 
 import com.example.collab.SharedVisit
-import com.example.data.TripVisitEntity
+import com.example.data.Kunjungan
+import com.example.data.Trip
 
 data class DisplayVisit(
     val id: String,
-    val localRoomId: Long?,
-    val sharedTripId: String?,
+    val tripId: String,
+    val tripName: String = "Pribadi",
+    val sharedTripId: String? = null,
     val sharedDocId: String? = null,
     val locationName: String,
     val tripTitle: String,
@@ -21,9 +23,10 @@ data class DisplayVisit(
 ) {
     val isShared: Boolean get() = sharedTripId != null
 
-    fun toLocalEntity(): TripVisitEntity {
-        return TripVisitEntity(
-            id = localRoomId ?: 0L,
+    fun toKunjunganEntity(): Kunjungan {
+        return Kunjungan(
+            id = id,
+            tripId = tripId,
             locationName = locationName,
             tripTitle = tripTitle,
             visitDateEpochDay = visitDateEpochDay,
@@ -32,17 +35,24 @@ data class DisplayVisit(
             planNotes = planNotes,
             memoryNotes = memoryNotes,
             isCompletedManually = completedManually,
+            createdByName = createdByName,
+            remoteDocId = sharedDocId,
+            remoteTripId = sharedTripId,
             createdAtMillis = createdAtMillis
         )
     }
 
     companion object {
-        fun fromLocal(entity: TripVisitEntity): DisplayVisit {
+        fun fromKunjungan(
+            entity: Kunjungan,
+            tripName: String = if (entity.tripId == Trip.PERSONAL_TRIP_ID) "Pribadi" else "Trip Bersama"
+        ): DisplayVisit {
             return DisplayVisit(
-                id = "local_${entity.id}",
-                localRoomId = entity.id,
-                sharedTripId = null,
-                sharedDocId = null,
+                id = entity.id,
+                tripId = entity.tripId,
+                tripName = tripName,
+                sharedTripId = entity.remoteTripId,
+                sharedDocId = entity.remoteDocId,
                 locationName = entity.locationName,
                 tripTitle = entity.tripTitle,
                 visitDateEpochDay = entity.visitDateEpochDay,
@@ -51,15 +61,19 @@ data class DisplayVisit(
                 planNotes = entity.planNotes,
                 memoryNotes = entity.memoryNotes,
                 completedManually = entity.isCompletedManually,
-                createdByName = "",
+                createdByName = entity.createdByName,
                 createdAtMillis = entity.createdAtMillis
             )
         }
 
-        fun fromShared(shared: SharedVisit): DisplayVisit {
+        fun fromShared(
+            shared: SharedVisit,
+            tripName: String = "Trip Bersama"
+        ): DisplayVisit {
             return DisplayVisit(
-                id = "shared_${shared.id}",
-                localRoomId = null,
+                id = Kunjungan.sharedVisitUuid(shared.tripId, shared.id),
+                tripId = Trip.sharedTripUuid(shared.tripId),
+                tripName = tripName,
                 sharedTripId = shared.tripId,
                 sharedDocId = shared.id,
                 locationName = shared.locationName,

@@ -30,6 +30,8 @@ import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -51,6 +53,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -73,18 +76,18 @@ import com.example.ui.TripBuddyViewModel
 import com.example.ui.TripTab
 import com.example.ui.components.AccountProfileSheet
 import com.example.ui.components.AddLocationSheet
+import com.example.ui.components.CameraVisitPickerDialog
 import com.example.ui.components.CollabWorkspaceBar
 import com.example.ui.components.CreateSharedTripDialog
 import com.example.ui.components.InviteMemberSheet
 import com.example.ui.components.JoinTripByCodeDialog
 import com.example.ui.components.MapsSearchSheet
-import com.example.ui.components.MemoryDetailSheet
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.CalendarScreen
-import com.example.ui.screens.DateMemoryDetailScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.MemoriesScreen
 import com.example.ui.screens.TripMembersScreen
+import com.example.ui.screens.VisitMemoryDetailScreen
 import com.example.ui.theme.AppThemeOption
 import com.example.ui.theme.ThemePreferences
 import com.example.ui.theme.TripBuddyTheme
@@ -107,8 +110,9 @@ class MainActivity : ComponentActivity() {
 
         val database = TripBuddyDatabase.getInstance(applicationContext)
         val localRepository = TripRepository(
-            tripVisitDao = database.tripVisitDao(),
-            memoryPhotoDao = database.memoryPhotoDao()
+            tripDao = database.tripDao(),
+            kunjunganDao = database.kunjunganDao(),
+            fotoDao = database.fotoDao()
         )
         val alarmScheduler = TripAlarmScheduler(applicationContext)
         val firestore = CollabRepository.getConfiguredFirestore(applicationContext)
@@ -201,8 +205,9 @@ fun TripBuddyApp(
     val credentialManager = remember(context) { CredentialManager.create(context) }
     var pendingTestAfterPermission by remember { mutableStateOf(false) }
 
-    var pendingCameraVisit by remember { mutableStateOf<DisplayVisit?>(null) }
-    var pendingPhotoFile by remember { mutableStateOf<File?>(null) }
+    // Survive Activity recreation while the external camera app is open
+    var pendingCameraVisitId by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingTempCapturePath by rememberSaveable { mutableStateOf<String?>(null) }
 
     val showMessage: (String) -> Unit = { msg ->
         coroutineScope.launch {
@@ -213,27 +218,33 @@ fun TripBuddyApp(
     val takePictureLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
     ) { success ->
-        val visit = pendingCameraVisit
-        val file = pendingPhotoFile
-        pendingCameraVisit = null
-        pendingPhotoFile = null
-        if (success && visit != null && file != null && file.exists() && file.length() > 0L) {
-            viewModel.saveCapturedPhoto(visit, file.absolutePath)
+        val visitId = pendingCameraVisitId
+        val capturePath = pendingTempCapturePath
+        pendingCameraVisitId = null
+        pendingTempCapturePath = null
+
+        val captureFile = capturePath?.let { File(it) }
+        if (success && !visitId.isNullOrBlank() && captureFile != null && captureFile.exists() && captureFile.length() > 0L) {
+            viewModel.saveCapturedPhoto(
+                context = context,
+                kunjunganId = visitId,
+                tempCaptureFile = captureFile
+            )
         } else {
-            PhotoStorageHelper.deleteFileQuietly(file?.absolutePath)
+            PhotoStorageHelper.deleteFileQuietly(capturePath)
         }
     }
 
-    val launchCameraForVisit: (DisplayVisit) -> Unit = { visit ->
+    val launchCameraForVisitId: (String) -> Unit = { visitId ->
         try {
-            val file = PhotoStorageHelper.createNewPhotoFile(context)
-            val uri = PhotoStorageHelper.getUriForFile(context, file)
-            pendingCameraVisit = visit
-            pendingPhotoFile = file
+            val tempFile = PhotoStorageHelper.createTempCaptureFile(context)
+            val uri = PhotoStorageHelper.getUriForFile(context, tempFile)
+            pendingCameraVisitId = visitId
+            pendingTempCapturePath = tempFile.absolutePath
             takePictureLauncher.launch(uri)
         } catch (e: Exception) {
-            pendingCameraVisit = null
-            pendingPhotoFile = null
+            pendingCameraVisitId = null
+            pendingTempCapturePath = null
             showMessage("Kamera tidak dapat dibuka: ${e.localizedMessage ?: "periksa aplikasi kamera"}")
         }
     }
@@ -241,20 +252,20 @@ fun TripBuddyApp(
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
-        val visit = pendingCameraVisit
-        if (granted && visit != null) {
-            launchCameraForVisit(visit)
+        val visitId = pendingCameraVisitId
+        if (granted && !visitId.isNullOrBlank()) {
+            launchCameraForVisitId(visitId)
         } else {
-            pendingCameraVisit = null
+            pendingCameraVisitId = null
             showMessage("Izin kamera diperlukan untuk memotret foto kenangan.")
         }
     }
 
     val requestCameraForVisit: (DisplayVisit) -> Unit = { visit ->
         if (PhotoStorageHelper.hasCameraPermission(context)) {
-            launchCameraForVisit(visit)
+            launchCameraForVisitId(visit.id)
         } else {
-            pendingCameraVisit = visit
+            pendingCameraVisitId = visit.id
             cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
@@ -362,13 +373,13 @@ fun TripBuddyApp(
             onBack = viewModel::closeMembersScreen,
             onInviteClick = { viewModel.openInviteSheet() }
         )
-    } else if (uiState.activeDateMemoryGroup != null) {
-        DateMemoryDetailScreen(
-            group = uiState.activeDateMemoryGroup!!,
-            onBack = viewModel::closeDateMemoryDetail,
+    } else if (uiState.activeVisitMemoryDetail != null) {
+        VisitMemoryDetailScreen(
+            detail = uiState.activeVisitMemoryDetail!!,
+            onBack = viewModel::closeVisitMemoryDetail,
             onTakePhotoForVisit = requestCameraForVisit,
             onDeletePhoto = viewModel::deleteMemoryPhoto,
-            onSaveMemoryNotes = { visit, notes -> viewModel.saveMemoryNotes(visit, notes) },
+            onSaveMemoryNotes = { kunjungan, notes -> viewModel.saveMemoryNotes(kunjungan, notes) },
             onOpenMapsForVisit = { visit -> viewModel.openMapsSearchSheet(visit) }
         )
     } else {
@@ -380,6 +391,25 @@ fun TripBuddyApp(
                 containerColor = MaterialTheme.colorScheme.background,
                 contentWindowInsets = WindowInsets.safeDrawing,
                 snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+                floatingActionButton = {
+                    if (uiState.selectedTab == TripTab.BERANDA || uiState.selectedTab == TripTab.KENANGAN) {
+                        ExtendedFloatingActionButton(
+                            onClick = viewModel::openCameraVisitPicker,
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.testTag("general_camera_fab")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PhotoCamera,
+                                contentDescription = stringResource(R.string.cd_take_photo)
+                            )
+                            Text(
+                                text = "Ambil Foto",
+                                modifier = Modifier.padding(start = 8.dp)
+                            )
+                        }
+                    }
+                },
                 bottomBar = {
                     if (!useNavRail) {
                         NavigationBar(
@@ -538,8 +568,8 @@ fun TripBuddyApp(
                                         uiState = uiState,
                                         onBackToHome = { viewModel.selectTab(TripTab.BERANDA) },
                                         onSearchQueryChange = viewModel::setMemorySearchQuery,
-                                        onFilterChange = viewModel::setMemoryFilter,
-                                        onDateMemoryClick = viewModel::openDateMemoryDetail
+                                        onTripFilterChange = viewModel::setMemoryTripFilter,
+                                        onVisitMemoryClick = viewModel::openVisitMemoryDetail
                                     )
                                 }
                             }
@@ -548,6 +578,19 @@ fun TripBuddyApp(
                 }
             }
         }
+    }
+
+    if (uiState.showCameraVisitPicker) {
+        CameraVisitPickerDialog(
+            todayVisits = uiState.todayVisitsAllTrips,
+            defaultVisit = uiState.defaultCameraVisit,
+            onDismiss = viewModel::dismissCameraVisitPicker,
+            onSelectVisit = { chosen -> requestCameraForVisit(chosen) },
+            onAddVisitToday = {
+                viewModel.selectTab(TripTab.KALENDER)
+                viewModel.openAddLocationSheet(uiState.todayEpochDay)
+            }
+        )
     }
 
     if (uiState.showCreateTripDialog) {
@@ -627,25 +670,6 @@ fun TripBuddyApp(
                 viewModel.updateLocationNameFromMapsSheet(visit, updatedName)
             },
             onShowMessage = showMessage
-        )
-    }
-
-    uiState.activeMemoryDetailVisit?.let { visit ->
-        MemoryDetailSheet(
-            visit = visit,
-            todayEpochDay = uiState.todayEpochDay,
-            onDismiss = viewModel::dismissMemoryDetailSheet,
-            onSaveMemoryNotes = { notes ->
-                viewModel.saveMemoryNotes(visit, notes)
-            },
-            onOpenMaps = { viewModel.openMapsSearchSheet(visit) },
-            onRevertCompleted = {
-                viewModel.toggleManualCompleted(visit)
-                showMessage("\"${visit.locationName}\" dikembalikan ke rencana")
-            },
-            onDelete = {
-                viewModel.deleteVisit(visit)
-            }
         )
     }
 }

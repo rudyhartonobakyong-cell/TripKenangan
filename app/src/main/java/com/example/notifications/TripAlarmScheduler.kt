@@ -5,7 +5,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import com.example.data.TripVisitEntity
+import com.example.data.Kunjungan
 import com.example.ui.DisplayVisit
 import com.example.util.DateUtils
 
@@ -28,10 +28,11 @@ class TripAlarmScheduler(private val context: Context) {
         }
     }
 
-    fun scheduleVisitReminder(visit: TripVisitEntity): AlarmScheduleResult {
+    fun scheduleVisitReminder(visit: Kunjungan): AlarmScheduleResult {
+        val requestCode = requestCodeForUuid(visit.id)
         return scheduleReminderInternal(
-            requestCode = requestCodeForVisit(visit.id),
-            visitId = visit.id,
+            requestCode = requestCode,
+            visitIdLong = requestCode.toLong(),
             locationName = visit.locationName,
             tripTitle = visit.tripTitle,
             visitDateEpochDay = visit.visitDateEpochDay,
@@ -42,36 +43,22 @@ class TripAlarmScheduler(private val context: Context) {
     }
 
     fun scheduleVisitReminder(visit: DisplayVisit): AlarmScheduleResult {
-        val localId = visit.localRoomId
-        return if (localId != null) {
-            scheduleReminderInternal(
-                requestCode = requestCodeForVisit(localId),
-                visitId = localId,
-                locationName = visit.locationName,
-                tripTitle = visit.tripTitle,
-                visitDateEpochDay = visit.visitDateEpochDay,
-                visitHour = visit.visitHour,
-                visitMinute = visit.visitMinute,
-                completedManually = visit.completedManually
-            )
-        } else {
-            val requestCode = requestCodeForSharedKey(visit.id)
-            scheduleReminderInternal(
-                requestCode = requestCode,
-                visitId = requestCode.toLong(),
-                locationName = visit.locationName,
-                tripTitle = visit.tripTitle,
-                visitDateEpochDay = visit.visitDateEpochDay,
-                visitHour = visit.visitHour,
-                visitMinute = visit.visitMinute,
-                completedManually = visit.completedManually
-            )
-        }
+        val requestCode = requestCodeForUuid(visit.id)
+        return scheduleReminderInternal(
+            requestCode = requestCode,
+            visitIdLong = requestCode.toLong(),
+            locationName = visit.locationName,
+            tripTitle = visit.tripTitle,
+            visitDateEpochDay = visit.visitDateEpochDay,
+            visitHour = visit.visitHour,
+            visitMinute = visit.visitMinute,
+            completedManually = visit.completedManually
+        )
     }
 
     private fun scheduleReminderInternal(
         requestCode: Int,
-        visitId: Long,
+        visitIdLong: Long,
         locationName: String,
         tripTitle: String,
         visitDateEpochDay: Long,
@@ -79,7 +66,7 @@ class TripAlarmScheduler(private val context: Context) {
         visitMinute: Int,
         completedManually: Boolean
     ): AlarmScheduleResult {
-        cancelByRequestCode(requestCode, visitId)
+        cancelByRequestCode(requestCode, visitIdLong)
 
         if (completedManually) {
             return AlarmScheduleResult(scheduled = false, usedExactAlarm = false)
@@ -97,7 +84,7 @@ class TripAlarmScheduler(private val context: Context) {
 
         val pendingIntent = buildReminderPendingIntent(
             requestCode = requestCode,
-            visitId = visitId,
+            visitId = visitIdLong,
             locationName = locationName,
             tripTitle = tripTitle,
             timeLabel = DateUtils.formatTime(visitHour, visitMinute),
@@ -108,18 +95,13 @@ class TripAlarmScheduler(private val context: Context) {
         return scheduleExactOrFallback(triggerAtMillis, pendingIntent)
     }
 
-    fun cancelVisitReminder(visitId: Long) {
-        cancelByRequestCode(requestCodeForVisit(visitId), visitId)
+    fun cancelVisitReminder(kunjunganId: String) {
+        val requestCode = requestCodeForUuid(kunjunganId)
+        cancelByRequestCode(requestCode, requestCode.toLong())
     }
 
     fun cancelVisitReminder(visit: DisplayVisit) {
-        val localId = visit.localRoomId
-        if (localId != null) {
-            cancelVisitReminder(localId)
-        } else {
-            val requestCode = requestCodeForSharedKey(visit.id)
-            cancelByRequestCode(requestCode, requestCode.toLong())
-        }
+        cancelVisitReminder(visit.id)
     }
 
     private fun cancelByRequestCode(requestCode: Int, visitId: Long) {
@@ -153,7 +135,7 @@ class TripAlarmScheduler(private val context: Context) {
         return scheduleExactOrFallback(triggerAtMillis, pendingIntent)
     }
 
-    fun rescheduleAllUpcomingReminders(visits: List<TripVisitEntity>) {
+    fun rescheduleAllUpcomingReminders(visits: List<Kunjungan>) {
         visits.forEach { visit ->
             scheduleVisitReminder(visit)
         }
@@ -212,13 +194,9 @@ class TripAlarmScheduler(private val context: Context) {
         return PendingIntent.getBroadcast(context, requestCode, intent, flags)
     }
 
-    private fun requestCodeForVisit(visitId: Long): Int {
-        val positive = (visitId.hashCode() and 0x3FFFFFFF)
+    private fun requestCodeForUuid(uuid: String): Int {
+        val positive = uuid.hashCode() and 0x3FFFFFFF
         return if (positive == TEST_REQUEST_CODE) positive - 1 else positive
-    }
-
-    private fun requestCodeForSharedKey(key: String): Int {
-        return (key.hashCode() and 0x3FFFFFFF) or 0x40000000
     }
 
     companion object {

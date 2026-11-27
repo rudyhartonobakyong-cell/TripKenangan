@@ -203,7 +203,7 @@ fun HomeScreen(
                     )
                     StatSummaryCard(
                         title = "Kenangan Tersimpan",
-                        count = uiState.dateMemoryGroups.size,
+                        count = uiState.visitMemories.size,
                         icon = Icons.Rounded.AutoAwesome,
                         tint = MaterialTheme.colorScheme.secondary,
                         containerColor = MaterialTheme.colorScheme.secondaryContainer,

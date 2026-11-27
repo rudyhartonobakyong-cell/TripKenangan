@@ -3,13 +3,17 @@ package com.example
 import androidx.compose.ui.graphics.Color
 import com.example.collab.CollabRepository
 import com.example.collab.SharedVisit
-import com.example.data.TripVisitEntity
+import com.example.data.Foto
+import com.example.data.Kunjungan
+import com.example.data.Trip
 import com.example.ui.DisplayVisit
+import com.example.ui.TripBuddyViewModel
 import com.example.ui.Workspace
 import com.example.ui.theme.AppThemeOption
 import com.example.util.DateUtils
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -66,9 +70,10 @@ class ExampleUnitTest {
   }
 
   @Test
-  fun `DisplayVisit maps local and shared visits cleanly`() {
-    val local = TripVisitEntity(
-      id = 42L,
+  fun `DisplayVisit maps Kunjungan and SharedVisit to deterministic UUIDs`() {
+    val localKunjungan = Kunjungan(
+      id = "11111111-1111-4111-8111-111111111111",
+      tripId = Trip.PERSONAL_TRIP_ID,
       locationName = "Ubud",
       tripTitle = "Bali",
       visitDateEpochDay = 20500L,
@@ -76,9 +81,11 @@ class ExampleUnitTest {
       visitMinute = 15,
       isCompletedManually = true
     )
-    val localDisplay = DisplayVisit.fromLocal(local)
+    val localDisplay = DisplayVisit.fromKunjungan(localKunjungan, "Pribadi")
     assertFalse(localDisplay.isShared)
-    assertEquals(42L, localDisplay.localRoomId)
+    assertEquals(localKunjungan.id, localDisplay.id)
+    assertEquals(Trip.PERSONAL_TRIP_ID, localDisplay.tripId)
+    assertEquals("Pribadi", localDisplay.tripName)
     assertTrue(localDisplay.completedManually)
 
     val shared = SharedVisit(
@@ -92,12 +99,69 @@ class ExampleUnitTest {
       completedManually = false,
       createdByName = "Budi"
     )
-    val sharedDisplay = DisplayVisit.fromShared(shared)
+    val sharedDisplay = DisplayVisit.fromShared(shared, "Trip Bali")
     assertTrue(sharedDisplay.isShared)
+    assertEquals(Kunjungan.sharedVisitUuid("trip456", "doc123"), sharedDisplay.id)
+    assertEquals(Trip.sharedTripUuid("trip456"), sharedDisplay.tripId)
     assertEquals("doc123", sharedDisplay.sharedDocId)
     assertEquals("trip456", sharedDisplay.sharedTripId)
+    assertEquals("Trip Bali", sharedDisplay.tripName)
     assertEquals("Budi", sharedDisplay.createdByName)
     assertFalse(sharedDisplay.completedManually)
+  }
+
+  @Test
+  fun `Trip Kunjungan Foto entities maintain distinct UUIDs and foreign links`() {
+    val trip = Trip(name = "Trip Yogyakarta")
+    val k1 = Kunjungan(
+      tripId = trip.id,
+      locationName = "Candi Prambanan",
+      visitDateEpochDay = 20700L,
+      visitHour = 9,
+      visitMinute = 0
+    )
+    val k2 = Kunjungan(
+      tripId = trip.id,
+      locationName = "Malioboro",
+      visitDateEpochDay = 20700L,
+      visitHour = 18,
+      visitMinute = 0
+    )
+    val foto1 = Foto(
+      kunjunganId = k1.id,
+      tripId = trip.id,
+      filePath = "/data/user/0/com.example/files/fotos/${trip.id}/${k1.id}/photo1.jpg"
+    )
+    assertNotEquals(k1.id, k2.id)
+    assertEquals(trip.id, k1.tripId)
+    assertEquals(k1.id, foto1.kunjunganId)
+    assertEquals(trip.id, foto1.tripId)
+  }
+
+  @Test
+  fun `findClosestVisitToNow selects today visit nearest to current time`() {
+    val today = DateUtils.epochDayFromYmd(2026, 10, 27)
+    val now = DateUtils.targetMillisForVisit(today, 14, 20)
+    val morning = DisplayVisit(
+      id = "v1",
+      tripId = Trip.PERSONAL_TRIP_ID,
+      locationName = "Sarapan Gudeg",
+      tripTitle = "",
+      visitDateEpochDay = today,
+      visitHour = 8,
+      visitMinute = 0,
+      planNotes = "",
+      memoryNotes = "",
+      completedManually = false,
+      createdByName = "",
+      createdAtMillis = 0L
+    )
+    val afternoon = morning.copy(id = "v2", locationName = "Pantai Parangtritis", visitHour = 15, visitMinute = 0)
+    val night = morning.copy(id = "v3", locationName = "Alun-Alun Kidul", visitHour = 20, visitMinute = 0)
+
+    val closest = TripBuddyViewModel.findClosestVisitToNow(listOf(morning, afternoon, night), now)
+    assertEquals("v2", closest?.id)
+    assertNull(TripBuddyViewModel.findClosestVisitToNow(emptyList(), now))
   }
 
   @Test
@@ -138,7 +202,7 @@ class ExampleUnitTest {
 
   @Test
   fun `Workspace storageKey maps local and shared trips cleanly`() {
-    assertEquals("local", Workspace.Local.storageKey())
-    assertEquals("shared_trip123", Workspace.Shared("trip123").storageKey())
+    assertEquals(Trip.PERSONAL_TRIP_ID, Workspace.Local.storageKey())
+    assertEquals(Trip.sharedTripUuid("trip123"), Workspace.Shared("trip123").storageKey())
   }
 }

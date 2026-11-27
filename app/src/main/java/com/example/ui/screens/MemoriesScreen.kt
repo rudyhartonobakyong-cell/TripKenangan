@@ -3,6 +3,7 @@ package com.example.ui.screens
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,7 +18,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
@@ -50,9 +52,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.R
-import com.example.ui.DateMemoryGroup
-import com.example.ui.MemoryFilter
+import com.example.data.Trip
 import com.example.ui.TripBuddyUiState
+import com.example.ui.VisitMemoryItem
 import com.example.ui.components.MemoryPhotoPlaceholder
 import com.example.util.DateUtils
 import java.io.File
@@ -62,8 +64,8 @@ fun MemoriesScreen(
     uiState: TripBuddyUiState,
     onBackToHome: () -> Unit,
     onSearchQueryChange: (String) -> Unit,
-    onFilterChange: (MemoryFilter) -> Unit,
-    onDateMemoryClick: (Long) -> Unit,
+    onTripFilterChange: (String?) -> Unit,
+    onVisitMemoryClick: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onBackToHome)
@@ -77,7 +79,7 @@ fun MemoriesScreen(
                 .fillMaxSize()
                 .widthIn(max = 720.dp),
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             item {
                 Row(
@@ -85,14 +87,17 @@ fun MemoriesScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
                         Text(
                             text = "Kenangan Perjalanan",
                             style = MaterialTheme.typography.headlineMedium,
                             color = MaterialTheme.colorScheme.onBackground
                         )
                         Text(
-                            text = "Koleksi foto & cerita per tanggal perjalanan",
+                            text = "Semua foto & catatan dari ruang Pribadi dan trip bersama",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -113,7 +118,7 @@ fun MemoriesScreen(
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
-                                text = "${uiState.dateMemoryGroups.size} Hari",
+                                text = "${uiState.visitMemories.size} Kunjungan",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer
                             )
@@ -122,7 +127,7 @@ fun MemoriesScreen(
                 }
             }
 
-            if (uiState.dateMemoryGroups.isNotEmpty()) {
+            if (uiState.visitMemories.isNotEmpty() || uiState.allTrips.size > 1) {
                 item {
                     OutlinedTextField(
                         value = uiState.memorySearchQuery,
@@ -130,7 +135,7 @@ fun MemoriesScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("memories_search_input"),
-                        placeholder = { Text("Cari tanggal, nama tempat, atau deskripsi...") },
+                        placeholder = { Text("Cari lokasi, nama trip, tanggal, atau deskripsi...") },
                         singleLine = true,
                         shape = RoundedCornerShape(16.dp),
                         leadingIcon = {
@@ -163,39 +168,59 @@ fun MemoriesScreen(
                 }
 
                 item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         FilterChip(
-                            selected = uiState.memoryFilter == MemoryFilter.SEMUA,
-                            onClick = { onFilterChange(MemoryFilter.SEMUA) },
-                            label = { Text("Semua (${uiState.dateMemoryGroups.size})") },
+                            selected = uiState.selectedMemoryTripId == null,
+                            onClick = { onTripFilterChange(null) },
+                            label = { Text("Semua (${uiState.visitMemories.size})") },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
                                 selectedLabelColor = MaterialTheme.colorScheme.primary
                             ),
                             modifier = Modifier.testTag("memories_filter_all")
                         )
-                        val withNotesCount = uiState.dateMemoryGroups.count { group ->
-                            group.visits.any { it.memoryNotes.isNotBlank() }
-                        }
+
+                        val personalCount = uiState.visitMemories.count { it.trip.isPersonal }
                         FilterChip(
-                            selected = uiState.memoryFilter == MemoryFilter.DENGAN_CATATAN,
-                            onClick = { onFilterChange(MemoryFilter.DENGAN_CATATAN) },
-                            label = { Text("Dengan Catatan ($withNotesCount)") },
+                            selected = uiState.selectedMemoryTripId == Trip.PERSONAL_TRIP_ID,
+                            onClick = { onTripFilterChange(Trip.PERSONAL_TRIP_ID) },
+                            label = { Text("Pribadi ($personalCount)") },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
                                 selectedLabelColor = MaterialTheme.colorScheme.primary
                             ),
-                            modifier = Modifier.testTag("memories_filter_notes")
+                            modifier = Modifier.testTag("memories_filter_personal")
                         )
+
+                        uiState.allTrips
+                            .filter { !it.isPersonal }
+                            .forEach { trip ->
+                                val count = uiState.visitMemories.count { it.trip.id == trip.id }
+                                FilterChip(
+                                    selected = uiState.selectedMemoryTripId == trip.id,
+                                    onClick = { onTripFilterChange(trip.id) },
+                                    label = { Text("${trip.name} ($count)") },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                        selectedLabelColor = MaterialTheme.colorScheme.primary
+                                    ),
+                                    modifier = Modifier.testTag("memories_filter_trip_${trip.id}")
+                                )
+                            }
                     }
                 }
             }
 
-            if (uiState.dateMemoryGroups.isEmpty()) {
+            if (uiState.visitMemories.isEmpty()) {
                 item {
                     EmptyMemoriesCard()
                 }
-            } else if (uiState.filteredDateMemories.isEmpty()) {
+            } else if (uiState.filteredVisitMemories.isEmpty()) {
                 item {
                     Surface(
                         shape = RoundedCornerShape(18.dp),
@@ -204,7 +229,7 @@ fun MemoriesScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "Tidak ada kenangan yang cocok dengan pencarian Anda.",
+                            text = "Tidak ada kenangan yang cocok dengan filter atau pencarian Anda.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
@@ -213,58 +238,92 @@ fun MemoriesScreen(
                     }
                 }
             } else {
-                items(
-                    items = uiState.filteredDateMemories,
-                    key = { it.dateEpochDay }
-                ) { group ->
-                    DateMemoryThumbnailCard(
-                        group = group,
-                        onClick = { onDateMemoryClick(group.dateEpochDay) }
-                    )
+                itemsIndexed(
+                    items = uiState.filteredVisitMemories,
+                    key = { _, item -> item.kunjungan.id }
+                ) { index, item ->
+                    val previousDate = uiState.filteredVisitMemories
+                        .getOrNull(index - 1)
+                        ?.kunjungan
+                        ?.visitDateEpochDay
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (previousDate != item.kunjungan.visitDateEpochDay) {
+                            Text(
+                                text = DateUtils.formatIndonesianFullDate(item.kunjungan.visitDateEpochDay),
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(top = if (index == 0) 0.dp else 6.dp)
+                            )
+                        }
+
+                        VisitMemoryThumbnailCard(
+                            item = item,
+                            onClick = { onVisitMemoryClick(item.kunjungan.id) }
+                        )
+                    }
                 }
             }
 
-            item { Spacer(modifier = Modifier.height(12.dp)) }
+            item { Spacer(modifier = Modifier.height(72.dp)) }
         }
     }
 }
 
 @Composable
-private fun DateMemoryThumbnailCard(
-    group: DateMemoryGroup,
+private fun VisitMemoryThumbnailCard(
+    item: VisitMemoryItem,
     onClick: () -> Unit
 ) {
+    val kunjungan = item.kunjungan
     Card(
         onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("memory_date_card_${group.dateEpochDay}"),
+            .testTag("memory_visit_card_${kunjungan.id}"),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            // Gambar sampul besar bergaya thumbnail YouTube (16:9)
+            // Gambar sampul besar bergaya thumbnail YouTube (16:9) dari foto pertama kunjungan ini
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
                     .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
             ) {
-                val coverFile = group.coverPhotoPath?.let { File(it) }?.takeIf { it.exists() }
+                val coverFile = item.coverPhotoPath?.let { File(it) }?.takeIf { it.exists() }
                 if (coverFile != null) {
                     AsyncImage(
                         model = coverFile,
-                        contentDescription = "Foto sampul ${group.locationTitle}",
+                        contentDescription = "Foto sampul ${kunjungan.locationName}",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
-                    MemoryPhotoPlaceholder(
-                        subtitle = null
+                    MemoryPhotoPlaceholder(subtitle = null)
+                }
+
+                // Badge nama trip di pojok kiri atas
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(10.dp)
+                ) {
+                    Text(
+                        text = item.trip.name,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
                     )
                 }
 
+                // Badge jumlah foto di pojok kanan bawah
                 Surface(
                     shape = RoundedCornerShape(10.dp),
                     color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
@@ -284,7 +343,7 @@ private fun DateMemoryThumbnailCard(
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = "${group.photos.size} foto",
+                            text = "${item.fotos.size} foto",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface
@@ -293,7 +352,7 @@ private fun DateMemoryThumbnailCard(
                 }
             }
 
-            // Metadata kartu di bawah thumbnail
+            // Metadata kunjungan di bawah thumbnail
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -321,7 +380,7 @@ private fun DateMemoryThumbnailCard(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
-                        text = group.locationTitle,
+                        text = kunjungan.locationName,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface,
@@ -330,7 +389,7 @@ private fun DateMemoryThumbnailCard(
                     )
 
                     Text(
-                        text = "${DateUtils.formatIndonesianFullDate(group.dateEpochDay)} • ${group.photos.size} foto",
+                        text = "${DateUtils.formatTime(kunjungan.visitHour, kunjungan.visitMinute)} WIB • ${DateUtils.formatIndonesianShortDate(kunjungan.visitDateEpochDay)} • ${item.fotos.size} foto",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 1,
@@ -338,7 +397,7 @@ private fun DateMemoryThumbnailCard(
                     )
 
                     Text(
-                        text = group.descriptionSnippet.ifBlank {
+                        text = item.descriptionSnippet.ifBlank {
                             "Ketuk kartu untuk melihat foto atau menulis deskripsi perjalanan."
                         },
                         style = MaterialTheme.typography.bodySmall,
@@ -385,7 +444,7 @@ private fun EmptyMemoriesCard() {
                 textAlign = TextAlign.Center
             )
             Text(
-                text = "Potret foto kunjungan hari ini, tandai selesai, atau tunggu tanggal kunjungan terlewati untuk melihat kartu kenangan per tanggal di sini.",
+                text = "Potret foto kunjungan hari ini atau tunggu tanggal kunjungan terlewati untuk melihat kartu kenangan per kunjungan di sini.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center

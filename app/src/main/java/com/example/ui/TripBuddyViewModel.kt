@@ -1,5 +1,6 @@
 package com.example.ui
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -11,12 +12,14 @@ import com.example.collab.TripDateComment
 import com.example.collab.TripMember
 import com.example.collab.extractFirestoreException
 import com.example.collab.formatFirestoreErrorForUi
-import com.example.data.MemoryPhotoEntity
+import com.example.data.Foto
+import com.example.data.Kunjungan
+import com.example.data.Trip
 import com.example.data.TripRepository
-import com.example.data.TripVisitEntity
 import com.example.notifications.AlarmScheduleResult
 import com.example.notifications.TripAlarmScheduler
 import com.example.util.DateUtils
+import com.example.util.PhotoStorageHelper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.Channel
@@ -31,10 +34,15 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.File
+import java.util.UUID
+import kotlin.math.abs
 
 enum class TripTab {
     BERANDA,
@@ -42,34 +50,38 @@ enum class TripTab {
     KENANGAN
 }
 
-enum class MemoryFilter {
-    SEMUA,
-    DENGAN_CATATAN
-}
-
 sealed interface Workspace {
     data object Local : Workspace
     data class Shared(val tripId: String) : Workspace
 
     fun storageKey(): String = when (this) {
-        Local -> "local"
-        is Shared -> "shared_$tripId"
+        Local -> Trip.PERSONAL_TRIP_ID
+        is Shared -> Trip.sharedTripUuid(tripId)
     }
 }
 
-data class DateMemoryGroup(
-    val dateEpochDay: Long,
-    val visits: List<DisplayVisit>,
-    val photos: List<MemoryPhotoEntity>,
-    val coverPhotoPath: String?,
-    val locationTitle: String,
-    val descriptionSnippet: String
-)
+data class VisitMemoryItem(
+    val kunjungan: Kunjungan,
+    val trip: Trip,
+    val fotos: List<Foto>
+) {
+    val coverPhotoPath: String? get() = fotos.firstOrNull()?.filePath
+    val descriptionSnippet: String get() = kunjungan.memoryNotes.ifBlank { kunjungan.planNotes }.trim()
+    fun toDisplayVisit(): DisplayVisit = DisplayVisit.fromKunjungan(kunjungan, trip.name)
+}
 
 private data class ActiveTripCollabData(
     val visits: List<SharedVisit> = emptyList(),
     val members: List<TripMember> = emptyList(),
     val comments: List<TripDateComment> = emptyList()
+)
+
+private data class RoomBaseSnapshot(
+    val allTrips: List<Trip>,
+    val allKunjungan: List<Kunjungan>,
+    val allFotos: List<Foto>,
+    val memoryItems: List<VisitMemoryItem>,
+    val activeDetail: VisitMemoryItem?
 )
 
 private data class NavAndModalState(
@@ -78,13 +90,13 @@ private data class NavAndModalState(
     val currentYear: Int = DateUtils.currentYearAndMonth().first,
     val currentMonth: Int = DateUtils.currentYearAndMonth().second,
     val selectedDateEpochDay: Long = DateUtils.todayEpochDay(),
-    val memoryFilter: MemoryFilter = MemoryFilter.SEMUA,
+    val selectedMemoryTripId: String? = null,
     val memorySearchQuery: String = "",
     val activeMapsVisit: DisplayVisit? = null,
     val activeAddEditDateEpochDay: Long? = null,
     val editingVisit: DisplayVisit? = null,
-    val activeMemoryDetailVisit: DisplayVisit? = null,
-    val activeMemoryDetailDateEpochDay: Long? = null,
+    val activeMemoryVisitId: String? = null,
+    val showCameraVisitPicker: Boolean = false,
     val showCreateTripDialog: Boolean = false,
     val createTripError: String? = null,
     val showJoinTripDialog: Boolean = false,
@@ -108,6 +120,7 @@ data class TripBuddyUiState(
     val activeDatabaseId: String = "",
     val selectedTab: TripTab = TripTab.BERANDA,
     val activeWorkspace: Workspace = Workspace.Local,
+    val allTrips: List<Trip> = emptyList(),
     val sharedTrips: List<SharedTrip> = emptyList(),
     val activeSharedTrip: SharedTrip? = null,
     val activeTripMembers: List<TripMember> = emptyList(),
@@ -119,15 +132,15 @@ data class TripBuddyUiState(
     val nowMillis: Long = System.currentTimeMillis(),
     val allVisits: List<DisplayVisit> = emptyList(),
     val todayVisits: List<DisplayVisit> = emptyList(),
+    val todayVisitsAllTrips: List<DisplayVisit> = emptyList(),
+    val defaultCameraVisit: DisplayVisit? = null,
     val upcomingVisits: List<DisplayVisit> = emptyList(),
     val nearestTrip: DisplayVisit? = null,
-    val visitedMemories: List<DisplayVisit> = emptyList(),
-    val filteredMemories: List<DisplayVisit> = emptyList(),
-    val dateMemoryGroups: List<DateMemoryGroup> = emptyList(),
-    val filteredDateMemories: List<DateMemoryGroup> = emptyList(),
+    val visitMemories: List<VisitMemoryItem> = emptyList(),
+    val filteredVisitMemories: List<VisitMemoryItem> = emptyList(),
     val photoCountByVisitId: Map<String, Int> = emptyMap(),
-    val activeDateMemoryGroup: DateMemoryGroup? = null,
-    val memoryFilter: MemoryFilter = MemoryFilter.SEMUA,
+    val activeVisitMemoryDetail: VisitMemoryItem? = null,
+    val selectedMemoryTripId: String? = null,
     val memorySearchQuery: String = "",
     val visitsOnSelectedDate: List<DisplayVisit> = emptyList(),
     val upcomingDatesInMonth: Set<Long> = emptySet(),
@@ -135,7 +148,7 @@ data class TripBuddyUiState(
     val activeMapsVisit: DisplayVisit? = null,
     val activeAddEditDateEpochDay: Long? = null,
     val editingVisit: DisplayVisit? = null,
-    val activeMemoryDetailVisit: DisplayVisit? = null,
+    val showCameraVisitPicker: Boolean = false,
     val showCreateTripDialog: Boolean = false,
     val createTripError: String? = null,
     val showJoinTripDialog: Boolean = false,
@@ -173,24 +186,57 @@ class TripBuddyViewModel(
         }
     }
 
+    private val todayEpochDayFlow = tickerMillis
+        .map { DateUtils.todayEpochDay(it) }
+        .distinctUntilChanged()
+
+    private val lastSyncedSharedTrips = MutableStateFlow<List<SharedTrip>>(emptyList())
+
+    init {
+        viewModelScope.launch {
+            localRepository.ensurePersonalTripExists()
+        }
+        // Background sync: keep ALL shared trips and ALL their visits synced into Room
+        // without wiping local memories or photos when offline or switching workspaces.
+        viewModelScope.launch {
+            lastSyncedSharedTrips
+                .flatMapLatest { trips ->
+                    if (trips.isEmpty()) {
+                        flowOf(Unit)
+                    } else {
+                        trips.map { trip ->
+                            collabRepository.observeTripVisits(trip.id)
+                                .onEach { remoteVisits ->
+                                    localRepository.syncSharedVisitsToRoom(trip, remoteVisits)
+                                }
+                                .catch { error ->
+                                    val firestoreError = extractFirestoreException(error)
+                                    if (firestoreError == null && error is CancellationException) throw error
+                                }
+                                .map { Unit }
+                        }.merge()
+                    }
+                }
+                .collect {}
+        }
+    }
+
     private fun extractErrorMessage(error: Throwable, fallback: String): String {
         return formatFirestoreErrorForUi(error, fallback)
     }
 
-    private val localDataFlow = combine(
-        localRepository.allVisits,
-        localRepository.allPhotos
-    ) { localVisits, allPhotos ->
-        localVisits to allPhotos
-    }
-
     private val sharedTripsFlow = collabRepository.observeUserTrips(currentUserId)
+        .onEach { trips ->
+            lastSyncedSharedTrips.value = trips
+            localRepository.syncSharedTripsToRoom(trips)
+        }
         .catch { error ->
             val firestoreError = extractFirestoreException(error)
             if (firestoreError == null && error is CancellationException) throw error
             val msg = extractErrorMessage(error, "Gagal memuat trip bersama.")
             navAndModalState.update { it.copy(collabErrorMessage = msg) }
-            emit(emptyList())
+            // Preserve last known trips so online errors never drop cached UI state
+            emit(lastSyncedSharedTrips.value)
         }
 
     private val activeSharedTripIdFlow = navAndModalState
@@ -225,32 +271,109 @@ class TripBuddyViewModel(
         }
     }
 
+    // Kenangan is queried directly from Room across ALL trips (Pribadi + all shared trips)
+    private val roomMemoriesFlow = todayEpochDayFlow.flatMapLatest { today ->
+        localRepository.observeMemoryKunjungan(today).map { rows ->
+            rows.map { row ->
+                VisitMemoryItem(
+                    kunjungan = row.kunjungan,
+                    trip = row.trip ?: Trip.personalTrip(),
+                    fotos = row.fotos.sortedBy { it.createdAtMillis }
+                )
+            }
+        }
+    }
+
+    private val activeDetailFlow = navAndModalState
+        .map { it.activeMemoryVisitId }
+        .distinctUntilChanged()
+        .flatMapLatest { visitId ->
+            if (visitId == null) {
+                flowOf(null)
+            } else {
+                localRepository.observeKunjunganDetailById(visitId).map { row ->
+                    row?.let {
+                        VisitMemoryItem(
+                            kunjungan = it.kunjungan,
+                            trip = it.trip ?: Trip.personalTrip(),
+                            fotos = it.fotos.sortedBy { f -> f.createdAtMillis }
+                        )
+                    }
+                }
+            }
+        }
+
+    private val roomBaseFlow = combine(
+        localRepository.allTrips,
+        localRepository.allKunjungan,
+        localRepository.allFotos,
+        roomMemoriesFlow,
+        activeDetailFlow
+    ) { trips, kunjunganList, fotos, memoryItems, activeDetail ->
+        RoomBaseSnapshot(
+            allTrips = trips,
+            allKunjungan = kunjunganList,
+            allFotos = fotos,
+            memoryItems = memoryItems,
+            activeDetail = activeDetail
+        )
+    }
+
     val uiState: StateFlow<TripBuddyUiState> = combine(
-        localDataFlow,
+        roomBaseFlow,
         sharedTripsFlow,
         activeTripCollabFlow,
         navAndModalState,
         tickerMillis
-    ) { (localVisits, allPhotos), sharedTrips, collabData, nav, nowMillis ->
+    ) { room, sharedTrips, collabData, nav, nowMillis ->
         val today = DateUtils.todayEpochDay(nowMillis)
-        val workspaceKey = nav.activeWorkspace.storageKey()
+        val tripById = room.allTrips.associateBy { it.id }
 
         val activeSharedTrip = (nav.activeWorkspace as? Workspace.Shared)?.let { shared ->
             sharedTrips.find { it.id == shared.tripId }
         }
 
+        val activeTripUuid = nav.activeWorkspace.storageKey()
+        val roomVisitsForWorkspace = room.allKunjungan
+            .filter { it.tripId == activeTripUuid }
+            .map { entity ->
+                DisplayVisit.fromKunjungan(
+                    entity = entity,
+                    tripName = tripById[entity.tripId]?.name
+                        ?: activeSharedTrip?.title
+                        ?: "Pribadi"
+                )
+            }
+
         val visits: List<DisplayVisit> = when (nav.activeWorkspace) {
-            Workspace.Local -> localVisits.map { DisplayVisit.fromLocal(it) }
-            is Workspace.Shared -> collabData.visits.map { DisplayVisit.fromShared(it) }
+            Workspace.Local -> roomVisitsForWorkspace
+            is Workspace.Shared -> {
+                if (collabData.visits.isNotEmpty()) {
+                    val sharedTripTitle = activeSharedTrip?.title ?: "Trip Bersama"
+                    collabData.visits.map { DisplayVisit.fromShared(it, sharedTripTitle) }
+                } else {
+                    roomVisitsForWorkspace
+                }
+            }
         }
 
-        val workspacePhotos = allPhotos.filter { it.workspaceKey == workspaceKey }
-        val photoCountByVisitId = workspacePhotos.groupingBy { it.visitId }.eachCount()
-        val photosByDate = workspacePhotos.groupBy { it.dateEpochDay }
+        val photoCountByVisitId = room.allFotos.groupingBy { it.kunjunganId }.eachCount()
 
         val todayVisits = visits
             .filter { it.visitDateEpochDay == today }
             .sortedWith(compareBy<DisplayVisit> { it.visitHour }.thenBy { it.visitMinute })
+
+        val todayVisitsAllTrips = room.allKunjungan
+            .filter { it.visitDateEpochDay == today }
+            .map { entity ->
+                DisplayVisit.fromKunjungan(
+                    entity = entity,
+                    tripName = tripById[entity.tripId]?.name ?: "Pribadi"
+                )
+            }
+            .sortedWith(compareBy<DisplayVisit> { it.visitHour }.thenBy { it.visitMinute })
+
+        val defaultCameraVisit = findClosestVisitToNow(todayVisitsAllTrips, nowMillis)
 
         val upcoming = visits
             .filter { visit -> !visit.completedManually && visit.visitDateEpochDay >= today }
@@ -260,77 +383,19 @@ class TripBuddyViewModel(
                     .thenBy { it.visitMinute }
             )
 
-        val memories = visits
-            .filter { visit ->
-                visit.completedManually ||
-                    visit.visitDateEpochDay < today ||
-                    (photoCountByVisitId[visit.id] ?: 0) > 0
-            }
-            .sortedWith(
-                compareByDescending<DisplayVisit> { it.visitDateEpochDay }
-                    .thenByDescending { it.visitHour }
-                    .thenByDescending { it.visitMinute }
-                    .thenByDescending { it.createdAtMillis }
-            )
-
-        val memoryDates = (memories.map { it.visitDateEpochDay } + photosByDate.keys)
-            .distinct()
-            .sortedDescending()
-
-        val dateMemoryGroups = memoryDates.map { epochDay ->
-            val visitsOnDay = memories.filter { it.visitDateEpochDay == epochDay }
-                .ifEmpty { visits.filter { it.visitDateEpochDay == epochDay } }
-            val photosOnDay = photosByDate[epochDay].orEmpty()
-            val locationTitle = if (visitsOnDay.isNotEmpty()) {
-                visitsOnDay.joinToString(" • ") { it.locationName }
-            } else {
-                photosOnDay.map { it.locationName }.distinct().joinToString(" • ")
-                    .ifBlank { "Kenangan Perjalanan" }
-            }
-            val snippet = visitsOnDay.mapNotNull { v ->
-                v.memoryNotes.ifBlank { v.planNotes }.trim().takeIf { it.isNotBlank() }
-            }.joinToString(" • ")
-
-            DateMemoryGroup(
-                dateEpochDay = epochDay,
-                visits = visitsOnDay,
-                photos = photosOnDay,
-                coverPhotoPath = photosOnDay.firstOrNull()?.filePath,
-                locationTitle = locationTitle,
-                descriptionSnippet = snippet
-            )
-        }
-
         val queryLower = nav.memorySearchQuery.trim().lowercase()
-        val filteredMemories = memories.filter { visit ->
-            val matchesFilter = when (nav.memoryFilter) {
-                MemoryFilter.SEMUA -> true
-                MemoryFilter.DENGAN_CATATAN -> visit.memoryNotes.isNotBlank()
-            }
+        val filteredVisitMemories = room.memoryItems.filter { item ->
+            val matchesTrip = nav.selectedMemoryTripId == null || item.trip.id == nav.selectedMemoryTripId
             val matchesSearch = if (queryLower.isEmpty()) {
                 true
             } else {
-                visit.locationName.lowercase().contains(queryLower) ||
-                    visit.tripTitle.lowercase().contains(queryLower) ||
-                    visit.memoryNotes.lowercase().contains(queryLower)
+                item.kunjungan.locationName.lowercase().contains(queryLower) ||
+                    item.trip.name.lowercase().contains(queryLower) ||
+                    item.kunjungan.tripTitle.lowercase().contains(queryLower) ||
+                    item.descriptionSnippet.lowercase().contains(queryLower) ||
+                    DateUtils.formatIndonesianFullDate(item.kunjungan.visitDateEpochDay).lowercase().contains(queryLower)
             }
-            matchesFilter && matchesSearch
-        }
-
-        val filteredDateMemories = dateMemoryGroups.filter { group ->
-            val matchesFilter = when (nav.memoryFilter) {
-                MemoryFilter.SEMUA -> true
-                MemoryFilter.DENGAN_CATATAN -> group.visits.any { it.memoryNotes.isNotBlank() }
-            }
-            val matchesSearch = if (queryLower.isEmpty()) {
-                true
-            } else {
-                group.locationTitle.lowercase().contains(queryLower) ||
-                    group.descriptionSnippet.lowercase().contains(queryLower) ||
-                    DateUtils.formatIndonesianFullDate(group.dateEpochDay).lowercase().contains(queryLower) ||
-                    group.visits.any { it.tripTitle.lowercase().contains(queryLower) }
-            }
-            matchesFilter && matchesSearch
+            matchesTrip && matchesSearch
         }
 
         val selectedVisits = visits.filter { it.visitDateEpochDay == nav.selectedDateEpochDay }
@@ -349,7 +414,8 @@ class TripBuddyViewModel(
         val memoryDatesInMonth = mutableSetOf<Long>()
         visits.forEach { visit ->
             if (visit.visitDateEpochDay in monthStart..monthEnd) {
-                if (!visit.completedManually && visit.visitDateEpochDay >= today) {
+                val hasPhotos = (photoCountByVisitId[visit.id] ?: 0) > 0
+                if (!visit.completedManually && visit.visitDateEpochDay >= today && !hasPhotos) {
                     upcomingDates.add(visit.visitDateEpochDay)
                 } else {
                     memoryDatesInMonth.add(visit.visitDateEpochDay)
@@ -358,13 +424,11 @@ class TripBuddyViewModel(
         }
 
         val refreshedMapsVisit = nav.activeMapsVisit?.let { current ->
-            visits.find { it.id == current.id } ?: current
-        }
-        val refreshedMemoryVisit = nav.activeMemoryDetailVisit?.let { current ->
-            visits.find { it.id == current.id } ?: current
-        }
-        val activeDateMemoryGroup = nav.activeMemoryDetailDateEpochDay?.let { epochDay ->
-            dateMemoryGroups.find { it.dateEpochDay == epochDay }
+            visits.find { it.id == current.id }
+                ?: room.allKunjungan.find { it.id == current.id }?.let {
+                    DisplayVisit.fromKunjungan(it, tripById[it.tripId]?.name ?: current.tripName)
+                }
+                ?: current
         }
 
         val refreshedInviteTrip = nav.showInviteSheetForTrip?.let { current ->
@@ -380,6 +444,7 @@ class TripBuddyViewModel(
             activeDatabaseId = collabRepository.getActiveDatabaseId(),
             selectedTab = nav.selectedTab,
             activeWorkspace = nav.activeWorkspace,
+            allTrips = room.allTrips,
             sharedTrips = sharedTrips,
             activeSharedTrip = activeSharedTrip,
             activeTripMembers = if (nav.activeWorkspace is Workspace.Shared) collabData.members else emptyList(),
@@ -391,15 +456,15 @@ class TripBuddyViewModel(
             nowMillis = nowMillis,
             allVisits = visits,
             todayVisits = todayVisits,
+            todayVisitsAllTrips = todayVisitsAllTrips,
+            defaultCameraVisit = defaultCameraVisit,
             upcomingVisits = upcoming,
             nearestTrip = upcoming.firstOrNull(),
-            visitedMemories = memories,
-            filteredMemories = filteredMemories,
-            dateMemoryGroups = dateMemoryGroups,
-            filteredDateMemories = filteredDateMemories,
+            visitMemories = room.memoryItems,
+            filteredVisitMemories = filteredVisitMemories,
             photoCountByVisitId = photoCountByVisitId,
-            activeDateMemoryGroup = activeDateMemoryGroup,
-            memoryFilter = nav.memoryFilter,
+            activeVisitMemoryDetail = room.activeDetail,
+            selectedMemoryTripId = nav.selectedMemoryTripId,
             memorySearchQuery = nav.memorySearchQuery,
             visitsOnSelectedDate = selectedVisits,
             upcomingDatesInMonth = upcomingDates,
@@ -407,7 +472,7 @@ class TripBuddyViewModel(
             activeMapsVisit = refreshedMapsVisit,
             activeAddEditDateEpochDay = nav.activeAddEditDateEpochDay,
             editingVisit = nav.editingVisit,
-            activeMemoryDetailVisit = refreshedMemoryVisit,
+            showCameraVisitPicker = nav.showCameraVisitPicker,
             showCreateTripDialog = nav.showCreateTripDialog,
             createTripError = nav.createTripError,
             showJoinTripDialog = nav.showJoinTripDialog,
@@ -439,7 +504,7 @@ class TripBuddyViewModel(
             it.copy(
                 selectedTab = tab,
                 showMembersScreen = false,
-                activeMemoryDetailDateEpochDay = null
+                activeMemoryVisitId = null
             )
         }
     }
@@ -451,9 +516,7 @@ class TripBuddyViewModel(
                 showMembersScreen = false,
                 activeMapsVisit = null,
                 activeAddEditDateEpochDay = null,
-                editingVisit = null,
-                activeMemoryDetailVisit = null,
-                activeMemoryDetailDateEpochDay = null
+                editingVisit = null
             )
         }
     }
@@ -481,6 +544,7 @@ class TripBuddyViewModel(
                 photoUrl = currentUserPhotoUrl
             )
             result.onSuccess { trip ->
+                localRepository.syncSharedTripToRoom(trip)
                 navAndModalState.update {
                     it.copy(
                         isSubmittingCollab = false,
@@ -592,34 +656,53 @@ class TripBuddyViewModel(
         }
     }
 
-    fun openDateMemoryDetail(epochDay: Long) {
-        navAndModalState.update { it.copy(activeMemoryDetailDateEpochDay = epochDay) }
+    fun openVisitMemoryDetail(kunjunganId: String) {
+        navAndModalState.update { it.copy(activeMemoryVisitId = kunjunganId) }
     }
 
-    fun closeDateMemoryDetail() {
-        navAndModalState.update { it.copy(activeMemoryDetailDateEpochDay = null) }
+    fun closeVisitMemoryDetail() {
+        navAndModalState.update { it.copy(activeMemoryVisitId = null) }
     }
 
-    fun saveCapturedPhoto(visit: DisplayVisit, filePath: String) {
-        val workspaceKey = navAndModalState.value.activeWorkspace.storageKey()
+    fun openCameraVisitPicker() {
+        navAndModalState.update { it.copy(showCameraVisitPicker = true) }
+    }
+
+    fun dismissCameraVisitPicker() {
+        navAndModalState.update { it.copy(showCameraVisitPicker = false) }
+    }
+
+    fun saveCapturedPhoto(
+        context: Context,
+        kunjunganId: String,
+        tempCaptureFile: File
+    ) {
         viewModelScope.launch {
-            localRepository.insertPhoto(
-                MemoryPhotoEntity(
-                    workspaceKey = workspaceKey,
-                    visitId = visit.id,
-                    locationName = visit.locationName,
-                    dateEpochDay = visit.visitDateEpochDay,
-                    filePath = filePath
-                )
+            val result = localRepository.saveCapturedPhotoForKunjungan(
+                context = context.applicationContext,
+                tempCaptureFile = tempCaptureFile,
+                kunjunganId = kunjunganId
             )
-            _snackbarEvents.trySend("Foto kenangan disimpan untuk ${visit.locationName}")
+            result.onSuccess { foto ->
+                val message = if (foto.mediaStoreUri != null) {
+                    "Foto kenangan disimpan di aplikasi & album TripBuddy"
+                } else {
+                    "Foto kenangan disimpan di penyimpanan aplikasi"
+                }
+                _snackbarEvents.trySend(message)
+            }.onFailure { error ->
+                PhotoStorageHelper.deleteFileQuietly(tempCaptureFile.absolutePath)
+                _snackbarEvents.trySend(
+                    "Gagal menyimpan foto: ${error.localizedMessage ?: "terjadi kesalahan"}"
+                )
+            }
         }
     }
 
-    fun deleteMemoryPhoto(photo: MemoryPhotoEntity) {
+    fun deleteMemoryPhoto(foto: Foto) {
         viewModelScope.launch {
-            localRepository.deletePhoto(photo)
-            _snackbarEvents.trySend("Foto dihapus")
+            localRepository.deleteFoto(foto)
+            _snackbarEvents.trySend("Foto dihapus dari aplikasi")
         }
     }
 
@@ -700,16 +783,8 @@ class TripBuddyViewModel(
         navAndModalState.update { it.copy(activeMapsVisit = null) }
     }
 
-    fun openMemoryDetailSheet(visit: DisplayVisit) {
-        navAndModalState.update { it.copy(activeMemoryDetailVisit = visit) }
-    }
-
-    fun dismissMemoryDetailSheet() {
-        navAndModalState.update { it.copy(activeMemoryDetailVisit = null) }
-    }
-
-    fun setMemoryFilter(filter: MemoryFilter) {
-        navAndModalState.update { it.copy(memoryFilter = filter) }
+    fun setMemoryTripFilter(tripId: String?) {
+        navAndModalState.update { it.copy(selectedMemoryTripId = tripId) }
     }
 
     fun setMemorySearchQuery(query: String) {
@@ -745,22 +820,26 @@ class TripBuddyViewModel(
                     completedManually = existing.completedManually
                 )
                 result.onSuccess {
-                    alarmScheduler.scheduleVisitReminder(
-                        existing.copy(
-                            locationName = cleanLocation,
-                            tripTitle = tripTitle.trim(),
-                            visitDateEpochDay = epochDay,
-                            visitHour = hour,
-                            visitMinute = minute,
-                            planNotes = planNotes.trim()
-                        )
+                    val updatedEntity = existing.toKunjunganEntity().copy(
+                        locationName = cleanLocation,
+                        tripTitle = tripTitle.trim(),
+                        visitDateEpochDay = epochDay,
+                        visitHour = hour,
+                        visitMinute = minute,
+                        planNotes = planNotes.trim()
                     )
+                    localRepository.upsertKunjungan(updatedEntity)
+                    alarmScheduler.scheduleVisitReminder(updatedEntity)
                     dismissAddEditSheet()
                     _snackbarEvents.trySend("Lokasi \"$cleanLocation\" diperbarui untuk semua anggota")
                 }.onFailure { error ->
                     _snackbarEvents.trySend(extractErrorMessage(error, "Gagal menyimpan perubahan lokasi."))
                 }
             } else if (existing == null && workspace is Workspace.Shared) {
+                val activeTrip = uiState.value.sharedTrips.find { it.id == workspace.tripId }
+                if (activeTrip != null) {
+                    localRepository.syncSharedTripToRoom(activeTrip)
+                }
                 val result = collabRepository.addSharedVisit(
                     tripId = workspace.tripId,
                     locationName = cleanLocation,
@@ -772,11 +851,10 @@ class TripBuddyViewModel(
                     authorName = currentUserName
                 )
                 result.onSuccess { docId ->
-                    val createdDisplay = DisplayVisit(
-                        id = "shared_$docId",
-                        localRoomId = null,
-                        sharedTripId = workspace.tripId,
-                        sharedDocId = docId,
+                    val visitUuid = Kunjungan.sharedVisitUuid(workspace.tripId, docId)
+                    val entity = Kunjungan(
+                        id = visitUuid,
+                        tripId = Trip.sharedTripUuid(workspace.tripId),
                         locationName = cleanLocation,
                         tripTitle = tripTitle.trim(),
                         visitDateEpochDay = epochDay,
@@ -784,18 +862,21 @@ class TripBuddyViewModel(
                         visitMinute = minute,
                         planNotes = planNotes.trim(),
                         memoryNotes = "",
-                        completedManually = false,
+                        isCompletedManually = false,
                         createdByName = currentUserName,
+                        remoteDocId = docId,
+                        remoteTripId = workspace.tripId,
                         createdAtMillis = System.currentTimeMillis()
                     )
-                    alarmScheduler.scheduleVisitReminder(createdDisplay)
+                    localRepository.upsertKunjungan(entity)
+                    alarmScheduler.scheduleVisitReminder(entity)
                     dismissAddEditSheet()
                     _snackbarEvents.trySend("Lokasi \"$cleanLocation\" ditambahkan ke trip bersama")
                 }.onFailure { error ->
                     _snackbarEvents.trySend(extractErrorMessage(error, "Gagal menambahkan lokasi."))
                 }
-            } else if (existing != null && existing.localRoomId != null) {
-                val updated = existing.toLocalEntity().copy(
+            } else if (existing != null) {
+                val updated = existing.toKunjunganEntity().copy(
                     locationName = cleanLocation,
                     tripTitle = tripTitle.trim(),
                     visitDateEpochDay = epochDay,
@@ -803,12 +884,14 @@ class TripBuddyViewModel(
                     visitMinute = minute,
                     planNotes = planNotes.trim()
                 )
-                localRepository.updateVisit(updated)
+                localRepository.upsertKunjungan(updated)
                 alarmScheduler.scheduleVisitReminder(updated)
                 dismissAddEditSheet()
                 _snackbarEvents.trySend("Lokasi \"$cleanLocation\" disimpan beserta pengingatnya")
             } else {
-                val newVisit = TripVisitEntity(
+                val newVisit = Kunjungan(
+                    id = UUID.randomUUID().toString(),
+                    tripId = Trip.PERSONAL_TRIP_ID,
                     locationName = cleanLocation,
                     tripTitle = tripTitle.trim(),
                     visitDateEpochDay = epochDay,
@@ -816,8 +899,8 @@ class TripBuddyViewModel(
                     visitMinute = minute,
                     planNotes = planNotes.trim()
                 )
-                val insertedId = localRepository.insertVisit(newVisit)
-                alarmScheduler.scheduleVisitReminder(newVisit.copy(id = insertedId))
+                localRepository.upsertKunjungan(newVisit)
+                alarmScheduler.scheduleVisitReminder(newVisit)
                 dismissAddEditSheet()
                 _snackbarEvents.trySend("Lokasi \"$cleanLocation\" disimpan beserta pengingatnya")
             }
@@ -842,13 +925,15 @@ class TripBuddyViewModel(
                     completedManually = visit.completedManually
                 )
                 result.onSuccess {
-                    alarmScheduler.scheduleVisitReminder(visit.copy(locationName = clean))
+                    val updated = visit.toKunjunganEntity().copy(locationName = clean)
+                    localRepository.upsertKunjungan(updated)
+                    alarmScheduler.scheduleVisitReminder(updated)
                 }.onFailure { error ->
                     _snackbarEvents.trySend(extractErrorMessage(error, "Gagal memperbarui nama lokasi."))
                 }
-            } else if (visit.localRoomId != null) {
-                val updated = visit.toLocalEntity().copy(locationName = clean)
-                localRepository.updateVisit(updated)
+            } else {
+                val updated = visit.toKunjunganEntity().copy(locationName = clean)
+                localRepository.upsertKunjungan(updated)
                 alarmScheduler.scheduleVisitReminder(updated)
             }
         }
@@ -871,18 +956,19 @@ class TripBuddyViewModel(
                     completedManually = nextCompleted
                 )
                 result.onSuccess {
-                    val updatedDisplay = visit.copy(completedManually = nextCompleted)
+                    val updated = visit.toKunjunganEntity().copy(isCompletedManually = nextCompleted)
+                    localRepository.upsertKunjungan(updated)
                     if (nextCompleted) {
-                        alarmScheduler.cancelVisitReminder(updatedDisplay)
+                        alarmScheduler.cancelVisitReminder(updated.id)
                     } else {
-                        alarmScheduler.scheduleVisitReminder(updatedDisplay)
+                        alarmScheduler.scheduleVisitReminder(updated)
                     }
                 }.onFailure { error ->
                     _snackbarEvents.trySend(extractErrorMessage(error, "Gagal memperbarui status lokasi."))
                 }
-            } else if (visit.localRoomId != null) {
-                val updated = visit.toLocalEntity().copy(isCompletedManually = nextCompleted)
-                localRepository.updateVisit(updated)
+            } else {
+                val updated = visit.toKunjunganEntity().copy(isCompletedManually = nextCompleted)
+                localRepository.upsertKunjungan(updated)
                 if (updated.isCompletedManually) {
                     alarmScheduler.cancelVisitReminder(updated.id)
                 } else {
@@ -892,32 +978,31 @@ class TripBuddyViewModel(
         }
     }
 
-    fun saveMemoryNotes(visit: DisplayVisit, memoryNotes: String) {
+    fun saveMemoryNotes(kunjungan: Kunjungan, memoryNotes: String) {
         val cleanNotes = memoryNotes.trim()
         viewModelScope.launch {
-            if (visit.isShared && visit.sharedTripId != null && visit.sharedDocId != null) {
+            // Save immediately in local Room per kunjunganId
+            localRepository.updateMemoryNotes(kunjungan.id, cleanNotes)
+            if (kunjungan.remoteTripId != null && kunjungan.remoteDocId != null) {
                 val result = collabRepository.updateSharedVisit(
-                    tripId = visit.sharedTripId,
-                    visitId = visit.sharedDocId,
-                    locationName = visit.locationName,
-                    tripTitle = visit.tripTitle,
-                    visitDateEpochDay = visit.visitDateEpochDay,
-                    visitHour = visit.visitHour,
-                    visitMinute = visit.visitMinute,
-                    planNotes = visit.planNotes,
+                    tripId = kunjungan.remoteTripId,
+                    visitId = kunjungan.remoteDocId,
+                    locationName = kunjungan.locationName,
+                    tripTitle = kunjungan.tripTitle,
+                    visitDateEpochDay = kunjungan.visitDateEpochDay,
+                    visitHour = kunjungan.visitHour,
+                    visitMinute = kunjungan.visitMinute,
+                    planNotes = kunjungan.planNotes,
                     memoryNotes = cleanNotes,
-                    completedManually = visit.completedManually
+                    completedManually = kunjungan.isCompletedManually
                 )
                 result.onSuccess {
-                    dismissMemoryDetailSheet()
-                    _snackbarEvents.trySend("Catatan kenangan disimpan")
-                }.onFailure { error ->
-                    _snackbarEvents.trySend(extractErrorMessage(error, "Gagal menyimpan catatan kenangan."))
+                    _snackbarEvents.trySend("Deskripsi kenangan disimpan")
+                }.onFailure {
+                    _snackbarEvents.trySend("Deskripsi disimpan di perangkat")
                 }
-            } else if (visit.localRoomId != null) {
-                localRepository.updateVisit(visit.toLocalEntity().copy(memoryNotes = cleanNotes))
-                dismissMemoryDetailSheet()
-                _snackbarEvents.trySend("Catatan kenangan disimpan")
+            } else {
+                _snackbarEvents.trySend("Deskripsi kenangan disimpan")
             }
         }
     }
@@ -927,26 +1012,25 @@ class TripBuddyViewModel(
             if (visit.isShared && visit.sharedTripId != null && visit.sharedDocId != null) {
                 val result = collabRepository.deleteSharedVisit(visit.sharedTripId, visit.sharedDocId)
                 result.onSuccess {
-                    alarmScheduler.cancelVisitReminder(visit)
-                    localRepository.deletePhotosForVisit(visit.id)
+                    alarmScheduler.cancelVisitReminder(visit.id)
+                    localRepository.deleteKunjunganById(visit.id)
                     navAndModalState.update { state ->
                         state.copy(
                             activeMapsVisit = if (state.activeMapsVisit?.id == visit.id) null else state.activeMapsVisit,
-                            activeMemoryDetailVisit = if (state.activeMemoryDetailVisit?.id == visit.id) null else state.activeMemoryDetailVisit
+                            activeMemoryVisitId = if (state.activeMemoryVisitId == visit.id) null else state.activeMemoryVisitId
                         )
                     }
                     _snackbarEvents.trySend("\"${visit.locationName}\" dihapus")
                 }.onFailure { error ->
                     _snackbarEvents.trySend(extractErrorMessage(error, "Gagal menghapus lokasi."))
                 }
-            } else if (visit.localRoomId != null) {
-                alarmScheduler.cancelVisitReminder(visit.localRoomId)
-                localRepository.deleteVisitById(visit.localRoomId)
-                localRepository.deletePhotosForVisit(visit.id)
+            } else {
+                alarmScheduler.cancelVisitReminder(visit.id)
+                localRepository.deleteKunjunganById(visit.id)
                 navAndModalState.update { state ->
                     state.copy(
                         activeMapsVisit = if (state.activeMapsVisit?.id == visit.id) null else state.activeMapsVisit,
-                        activeMemoryDetailVisit = if (state.activeMemoryDetailVisit?.id == visit.id) null else state.activeMemoryDetailVisit
+                        activeMemoryVisitId = if (state.activeMemoryVisitId == visit.id) null else state.activeMemoryVisitId
                     )
                 }
                 _snackbarEvents.trySend("\"${visit.locationName}\" dihapus")
@@ -984,6 +1068,23 @@ class TripBuddyViewModel(
 
     fun scheduleTestNotification(): AlarmScheduleResult {
         return alarmScheduler.scheduleTestNotification(delaySeconds = 10)
+    }
+
+    companion object {
+        fun findClosestVisitToNow(
+            todayVisits: List<DisplayVisit>,
+            nowMillis: Long
+        ): DisplayVisit? {
+            if (todayVisits.isEmpty()) return null
+            return todayVisits.minByOrNull { visit ->
+                val visitMillis = DateUtils.targetMillisForVisit(
+                    epochDay = visit.visitDateEpochDay,
+                    hour = visit.visitHour,
+                    minute = visit.visitMinute
+                )
+                abs(visitMillis - nowMillis)
+            }
+        }
     }
 
     class Factory(
