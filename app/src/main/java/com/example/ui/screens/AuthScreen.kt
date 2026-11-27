@@ -56,7 +56,6 @@ import androidx.credentials.CredentialManager
 import com.example.R
 import com.example.auth.attemptAutoSignIn
 import com.example.auth.onGoogleSignInClicked
-import com.example.ui.theme.PureWhite
 
 @Composable
 fun AuthScreen(
@@ -206,13 +205,13 @@ fun AuthScreen(
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = PureWhite
+                        contentColor = MaterialTheme.colorScheme.onPrimary
                     )
                 ) {
                     if (isLoading || isCheckingSession) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(22.dp),
-                            color = PureWhite,
+                            color = MaterialTheme.colorScheme.onPrimary,
                             strokeWidth = 2.dp
                         )
                         Spacer(modifier = Modifier.width(10.dp))

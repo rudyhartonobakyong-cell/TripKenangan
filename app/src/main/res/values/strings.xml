@@ -13,6 +13,8 @@
     <string name="cd_mark_visited">Tandai sudah dikunjungi</string>
     <string name="cd_edit_memory_note">Ubah catatan kenangan</string>
     <string name="cd_delete_location">Hapus lokasi</string>
+    <string name="cd_take_photo">Ambil foto kenangan</string>
+    <string name="cd_delete_photo">Hapus foto</string>
     <string name="notification_channel_name">Pengingat Perjalanan</string>
     <string name="notification_channel_desc">Notifikasi pengingat jadwal lokasi kunjungan TripBuddy</string>
     <string name="test_notification_button">Tes notifikasi</string>

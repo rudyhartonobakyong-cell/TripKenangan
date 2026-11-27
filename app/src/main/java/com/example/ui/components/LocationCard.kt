@@ -17,6 +17,7 @@ import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Map
+import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -41,6 +42,8 @@ fun LocationCard(
     showDateBadge: Boolean,
     onOpenMapsClick: () -> Unit,
     onToggleComplete: () -> Unit,
+    photoCount: Int = 0,
+    onTakePhotoClick: (() -> Unit)? = null,
     onEditClick: (() -> Unit)? = null,
     onDeleteClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -114,6 +117,19 @@ fun LocationCard(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                        if (photoCount > 0) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(
+                                    text = "$photoCount foto",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
                         if (visit.isShared && visit.createdByName.isNotBlank()) {
                             Text(
                                 text = "• ${visit.createdByName}",
@@ -176,7 +192,7 @@ fun LocationCard(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Ketuk untuk cari di Google Maps",
+                            text = "Google Maps",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -184,6 +200,21 @@ fun LocationCard(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (onTakePhotoClick != null) {
+                        IconButton(
+                            onClick = onTakePhotoClick,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("camera_button_${visit.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PhotoCamera,
+                                contentDescription = stringResource(R.string.cd_take_photo),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+
                     IconButton(
                         onClick = onToggleComplete,
                         modifier = Modifier

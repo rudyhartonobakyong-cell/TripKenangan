@@ -65,6 +65,7 @@ fun CalendarScreen(
     onAddLocationForSelectedDate: () -> Unit,
     onOpenMapsForVisit: (DisplayVisit) -> Unit,
     onToggleComplete: (DisplayVisit) -> Unit,
+    onTakePhotoForVisit: (DisplayVisit) -> Unit,
     onEditVisit: (DisplayVisit) -> Unit,
     onDeleteVisit: (DisplayVisit) -> Unit,
     onSendComment: (String) -> Unit,
@@ -122,8 +123,10 @@ fun CalendarScreen(
                             LocationCard(
                                 visit = visit,
                                 showDateBadge = false,
+                                photoCount = uiState.photoCountByVisitId[visit.id] ?: 0,
                                 onOpenMapsClick = { onOpenMapsForVisit(visit) },
                                 onToggleComplete = { onToggleComplete(visit) },
+                                onTakePhotoClick = { onTakePhotoForVisit(visit) },
                                 onEditClick = { onEditVisit(visit) },
                                 onDeleteClick = { onDeleteVisit(visit) }
                             )
@@ -183,8 +186,10 @@ fun CalendarScreen(
                         LocationCard(
                             visit = visit,
                             showDateBadge = false,
+                            photoCount = uiState.photoCountByVisitId[visit.id] ?: 0,
                             onOpenMapsClick = { onOpenMapsForVisit(visit) },
                             onToggleComplete = { onToggleComplete(visit) },
+                            onTakePhotoClick = { onTakePhotoForVisit(visit) },
                             onEditClick = { onEditVisit(visit) },
                             onDeleteClick = { onDeleteVisit(visit) }
                         )

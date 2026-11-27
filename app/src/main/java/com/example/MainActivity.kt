@@ -68,6 +68,7 @@ import com.example.data.TripBuddyDatabase
 import com.example.data.TripRepository
 import com.example.notifications.TripAlarmScheduler
 import com.example.notifications.TripNotificationHelper
+import com.example.ui.DisplayVisit
 import com.example.ui.TripBuddyViewModel
 import com.example.ui.TripTab
 import com.example.ui.components.AccountProfileSheet
@@ -80,13 +81,18 @@ import com.example.ui.components.MapsSearchSheet
 import com.example.ui.components.MemoryDetailSheet
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.CalendarScreen
+import com.example.ui.screens.DateMemoryDetailScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.MemoriesScreen
 import com.example.ui.screens.TripMembersScreen
+import com.example.ui.theme.AppThemeOption
+import com.example.ui.theme.ThemePreferences
 import com.example.ui.theme.TripBuddyTheme
+import com.example.util.PhotoStorageHelper
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import kotlinx.coroutines.launch
+import java.io.File
 
 class MainActivity : ComponentActivity() {
 
@@ -100,14 +106,21 @@ class MainActivity : ComponentActivity() {
         deepLinkInviteCode = extractInviteCodeFromIntent(intent)
 
         val database = TripBuddyDatabase.getInstance(applicationContext)
-        val localRepository = TripRepository(database.tripVisitDao())
+        val localRepository = TripRepository(
+            tripVisitDao = database.tripVisitDao(),
+            memoryPhotoDao = database.memoryPhotoDao()
+        )
         val alarmScheduler = TripAlarmScheduler(applicationContext)
         val firestore = CollabRepository.getConfiguredFirestore(applicationContext)
         val configuredDatabaseId = CollabRepository.resolveConfiguredDatabaseId(applicationContext)
         val collabRepository = CollabRepository(firestore, Firebase.auth, configuredDatabaseId)
 
         setContent {
-            TripBuddyTheme {
+            var selectedTheme by remember {
+                mutableStateOf(ThemePreferences.loadTheme(applicationContext))
+            }
+
+            TripBuddyTheme(appTheme = selectedTheme) {
                 val currentUser by Firebase.auth.authStateFlow()
                     .collectAsStateWithLifecycle(initialValue = Firebase.auth.currentUser)
 
@@ -139,7 +152,14 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        TripBuddyApp(viewModel = viewModel)
+                        TripBuddyApp(
+                            viewModel = viewModel,
+                            selectedTheme = selectedTheme,
+                            onSelectTheme = { newTheme ->
+                                selectedTheme = newTheme
+                                ThemePreferences.saveTheme(applicationContext, newTheme)
+                            }
+                        )
                     }
                 }
             }
@@ -169,7 +189,11 @@ private data class NavTabItem(
 )
 
 @Composable
-fun TripBuddyApp(viewModel: TripBuddyViewModel) {
+fun TripBuddyApp(
+    viewModel: TripBuddyViewModel,
+    selectedTheme: AppThemeOption,
+    onSelectTheme: (AppThemeOption) -> Unit
+) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -177,9 +201,61 @@ fun TripBuddyApp(viewModel: TripBuddyViewModel) {
     val credentialManager = remember(context) { CredentialManager.create(context) }
     var pendingTestAfterPermission by remember { mutableStateOf(false) }
 
+    var pendingCameraVisit by remember { mutableStateOf<DisplayVisit?>(null) }
+    var pendingPhotoFile by remember { mutableStateOf<File?>(null) }
+
     val showMessage: (String) -> Unit = { msg ->
         coroutineScope.launch {
             snackbarHostState.showSnackbar(msg)
+        }
+    }
+
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        val visit = pendingCameraVisit
+        val file = pendingPhotoFile
+        pendingCameraVisit = null
+        pendingPhotoFile = null
+        if (success && visit != null && file != null && file.exists() && file.length() > 0L) {
+            viewModel.saveCapturedPhoto(visit, file.absolutePath)
+        } else {
+            PhotoStorageHelper.deleteFileQuietly(file?.absolutePath)
+        }
+    }
+
+    val launchCameraForVisit: (DisplayVisit) -> Unit = { visit ->
+        try {
+            val file = PhotoStorageHelper.createNewPhotoFile(context)
+            val uri = PhotoStorageHelper.getUriForFile(context, file)
+            pendingCameraVisit = visit
+            pendingPhotoFile = file
+            takePictureLauncher.launch(uri)
+        } catch (e: Exception) {
+            pendingCameraVisit = null
+            pendingPhotoFile = null
+            showMessage("Kamera tidak dapat dibuka: ${e.localizedMessage ?: "periksa aplikasi kamera"}")
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val visit = pendingCameraVisit
+        if (granted && visit != null) {
+            launchCameraForVisit(visit)
+        } else {
+            pendingCameraVisit = null
+            showMessage("Izin kamera diperlukan untuk memotret foto kenangan.")
+        }
+    }
+
+    val requestCameraForVisit: (DisplayVisit) -> Unit = { visit ->
+        if (PhotoStorageHelper.hasCameraPermission(context)) {
+            launchCameraForVisit(visit)
+        } else {
+            pendingCameraVisit = visit
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
@@ -285,6 +361,15 @@ fun TripBuddyApp(viewModel: TripBuddyViewModel) {
             currentUserId = uiState.currentUserId,
             onBack = viewModel::closeMembersScreen,
             onInviteClick = { viewModel.openInviteSheet() }
+        )
+    } else if (uiState.activeDateMemoryGroup != null) {
+        DateMemoryDetailScreen(
+            group = uiState.activeDateMemoryGroup!!,
+            onBack = viewModel::closeDateMemoryDetail,
+            onTakePhotoForVisit = requestCameraForVisit,
+            onDeletePhoto = viewModel::deleteMemoryPhoto,
+            onSaveMemoryNotes = { visit, notes -> viewModel.saveMemoryNotes(visit, notes) },
+            onOpenMapsForVisit = { visit -> viewModel.openMapsSearchSheet(visit) }
         )
     } else {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -409,6 +494,7 @@ fun TripBuddyApp(viewModel: TripBuddyViewModel) {
                                             viewModel.toggleManualCompleted(visit)
                                             showMessage("\"${visit.locationName}\" dipindahkan ke Kenangan")
                                         },
+                                        onTakePhotoForVisit = requestCameraForVisit,
                                         onTestNotificationClick = {
                                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                                                 !TripNotificationHelper.hasNotificationPermission(context)
@@ -441,6 +527,7 @@ fun TripBuddyApp(viewModel: TripBuddyViewModel) {
                                             }
                                             showMessage(msg)
                                         },
+                                        onTakePhotoForVisit = requestCameraForVisit,
                                         onEditVisit = { visit -> viewModel.openEditLocationSheet(visit) },
                                         onDeleteVisit = { visit -> viewModel.deleteVisit(visit) },
                                         onSendComment = viewModel::sendDateComment,
@@ -452,8 +539,7 @@ fun TripBuddyApp(viewModel: TripBuddyViewModel) {
                                         onBackToHome = { viewModel.selectTab(TripTab.BERANDA) },
                                         onSearchQueryChange = viewModel::setMemorySearchQuery,
                                         onFilterChange = viewModel::setMemoryFilter,
-                                        onMemoryClick = viewModel::openMemoryDetailSheet,
-                                        onOpenMapsForVisit = { visit -> viewModel.openMapsSearchSheet(visit) }
+                                        onDateMemoryClick = viewModel::openDateMemoryDetail
                                     )
                                 }
                             }
@@ -496,6 +582,8 @@ fun TripBuddyApp(viewModel: TripBuddyViewModel) {
             displayName = uiState.currentUserName,
             email = uiState.currentUserEmail,
             photoUrl = uiState.currentUserPhotoUrl,
+            selectedTheme = selectedTheme,
+            onSelectTheme = onSelectTheme,
             projectId = uiState.activeProjectId,
             databaseId = uiState.activeDatabaseId,
             isTestingFirestore = uiState.isTestingFirestore,

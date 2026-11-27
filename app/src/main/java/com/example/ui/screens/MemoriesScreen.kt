@@ -9,12 +9,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -22,9 +22,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.EditNote
-import androidx.compose.material.icons.rounded.Map
-import androidx.compose.material.icons.rounded.Place
+import androidx.compose.material.icons.rounded.LocationOn
+import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -45,14 +44,18 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import com.example.R
-import com.example.ui.DisplayVisit
+import com.example.ui.DateMemoryGroup
 import com.example.ui.MemoryFilter
 import com.example.ui.TripBuddyUiState
+import com.example.ui.components.MemoryPhotoPlaceholder
 import com.example.util.DateUtils
+import java.io.File
 
 @Composable
 fun MemoriesScreen(
@@ -60,8 +63,7 @@ fun MemoriesScreen(
     onBackToHome: () -> Unit,
     onSearchQueryChange: (String) -> Unit,
     onFilterChange: (MemoryFilter) -> Unit,
-    onMemoryClick: (DisplayVisit) -> Unit,
-    onOpenMapsForVisit: (DisplayVisit) -> Unit,
+    onDateMemoryClick: (Long) -> Unit,
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onBackToHome)
@@ -75,7 +77,7 @@ fun MemoriesScreen(
                 .fillMaxSize()
                 .widthIn(max = 720.dp),
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             item {
                 Row(
@@ -90,7 +92,7 @@ fun MemoriesScreen(
                             color = MaterialTheme.colorScheme.onBackground
                         )
                         Text(
-                            text = "Daftar tempat yang pernah Anda kunjungi",
+                            text = "Koleksi foto & cerita per tanggal perjalanan",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -111,7 +113,7 @@ fun MemoriesScreen(
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
-                                text = "${uiState.visitedMemories.size} Tempat",
+                                text = "${uiState.dateMemoryGroups.size} Hari",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer
                             )
@@ -120,7 +122,7 @@ fun MemoriesScreen(
                 }
             }
 
-            if (uiState.visitedMemories.isNotEmpty()) {
+            if (uiState.dateMemoryGroups.isNotEmpty()) {
                 item {
                     OutlinedTextField(
                         value = uiState.memorySearchQuery,
@@ -128,7 +130,7 @@ fun MemoriesScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("memories_search_input"),
-                        placeholder = { Text("Cari nama tempat atau catatan kenangan...") },
+                        placeholder = { Text("Cari tanggal, nama tempat, atau deskripsi...") },
                         singleLine = true,
                         shape = RoundedCornerShape(16.dp),
                         leadingIcon = {
@@ -165,14 +167,16 @@ fun MemoriesScreen(
                         FilterChip(
                             selected = uiState.memoryFilter == MemoryFilter.SEMUA,
                             onClick = { onFilterChange(MemoryFilter.SEMUA) },
-                            label = { Text("Semua (${uiState.visitedMemories.size})") },
+                            label = { Text("Semua (${uiState.dateMemoryGroups.size})") },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
                                 selectedLabelColor = MaterialTheme.colorScheme.primary
                             ),
                             modifier = Modifier.testTag("memories_filter_all")
                         )
-                        val withNotesCount = uiState.visitedMemories.count { it.memoryNotes.isNotBlank() }
+                        val withNotesCount = uiState.dateMemoryGroups.count { group ->
+                            group.visits.any { it.memoryNotes.isNotBlank() }
+                        }
                         FilterChip(
                             selected = uiState.memoryFilter == MemoryFilter.DENGAN_CATATAN,
                             onClick = { onFilterChange(MemoryFilter.DENGAN_CATATAN) },
@@ -187,11 +191,11 @@ fun MemoriesScreen(
                 }
             }
 
-            if (uiState.visitedMemories.isEmpty()) {
+            if (uiState.dateMemoryGroups.isEmpty()) {
                 item {
                     EmptyMemoriesCard()
                 }
-            } else if (uiState.filteredMemories.isEmpty()) {
+            } else if (uiState.filteredDateMemories.isEmpty()) {
                 item {
                     Surface(
                         shape = RoundedCornerShape(18.dp),
@@ -209,11 +213,13 @@ fun MemoriesScreen(
                     }
                 }
             } else {
-                items(uiState.filteredMemories, key = { it.id }) { visit ->
-                    MemoryPlaceCard(
-                        visit = visit,
-                        onCardClick = { onMemoryClick(visit) },
-                        onOpenMapsClick = { onOpenMapsForVisit(visit) }
+                items(
+                    items = uiState.filteredDateMemories,
+                    key = { it.dateEpochDay }
+                ) { group ->
+                    DateMemoryThumbnailCard(
+                        group = group,
+                        onClick = { onDateMemoryClick(group.dateEpochDay) }
                     )
                 }
             }
@@ -224,148 +230,120 @@ fun MemoriesScreen(
 }
 
 @Composable
-private fun MemoryPlaceCard(
-    visit: DisplayVisit,
-    onCardClick: () -> Unit,
-    onOpenMapsClick: () -> Unit
+private fun DateMemoryThumbnailCard(
+    group: DateMemoryGroup,
+    onClick: () -> Unit
 ) {
     Card(
-        onClick = onCardClick,
+        onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("memory_card_${visit.id}"),
-        shape = RoundedCornerShape(18.dp),
+            .testTag("memory_date_card_${group.dateEpochDay}"),
+        shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // Gambar sampul besar bergaya thumbnail YouTube (16:9)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+            ) {
+                val coverFile = group.coverPhotoPath?.let { File(it) }?.takeIf { it.exists() }
+                if (coverFile != null) {
+                    AsyncImage(
+                        model = coverFile,
+                        contentDescription = "Foto sampul ${group.locationTitle}",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    MemoryPhotoPlaceholder(
+                        subtitle = null
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PhotoLibrary,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "${group.photos.size} foto",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+
+            // Metadata kartu di bawah thumbnail
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Top,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.Top
             ) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.secondaryContainer,
-                    modifier = Modifier.size(44.dp)
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier.size(40.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Place,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.padding(10.dp)
-                    )
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Rounded.LocationOn,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
                 }
 
                 Column(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = DateUtils.formatIndonesianShortDate(visit.visitDateEpochDay),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.secondary
-                        )
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = if (visit.completedManually) {
-                                MaterialTheme.colorScheme.secondaryContainer
-                            } else {
-                                MaterialTheme.colorScheme.primaryContainer
-                            }
-                        ) {
-                            Text(
-                                text = if (visit.completedManually) "Selesai" else "Telah Berlalu",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (visit.completedManually) {
-                                    MaterialTheme.colorScheme.secondary
-                                } else {
-                                    MaterialTheme.colorScheme.primary
-                                },
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                            )
-                        }
-                        if (visit.isShared && visit.createdByName.isNotBlank()) {
-                            Text(
-                                text = "• ${visit.createdByName}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-
                     Text(
-                        text = visit.locationName,
+                        text = group.locationTitle,
                         style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
 
-                    if (visit.tripTitle.isNotBlank()) {
-                        Text(
-                            text = visit.tripTitle,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-
-                IconButton(
-                    onClick = onOpenMapsClick,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("memory_card_maps_button_${visit.id}")
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Map,
-                        contentDescription = stringResource(R.string.cd_open_maps),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
-
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.EditNote,
-                        contentDescription = stringResource(R.string.cd_edit_memory_note),
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp)
-                    )
                     Text(
-                        text = if (visit.memoryNotes.isNotBlank()) {
-                            visit.memoryNotes
-                        } else {
-                            "Ketuk kartu ini untuk menulis catatan kenangan..."
+                        text = "${DateUtils.formatIndonesianFullDate(group.dateEpochDay)} • ${group.photos.size} foto",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    Text(
+                        text = group.descriptionSnippet.ifBlank {
+                            "Ketuk kartu untuk melihat foto atau menulis deskripsi perjalanan."
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (visit.memoryNotes.isNotBlank()) {
-                            MaterialTheme.colorScheme.onSurface
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        maxLines = 3,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
@@ -401,13 +379,13 @@ private fun EmptyMemoriesCard() {
                 contentScale = ContentScale.Crop
             )
             Text(
-                text = "Belum Ada Tempat Dikunjungi",
+                text = "Belum Ada Kenangan Tersimpan",
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface,
                 textAlign = TextAlign.Center
             )
             Text(
-                text = "Tempat yang tanggal kunjungannya sudah lewat atau Anda tandai selesai akan otomatis tersimpan menjadi kenangan di sini.",
+                text = "Potret foto kunjungan hari ini, tandai selesai, atau tunggu tanggal kunjungan terlewati untuk melihat kartu kenangan per tanggal di sini.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center

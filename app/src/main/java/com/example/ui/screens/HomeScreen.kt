@@ -28,6 +28,7 @@ import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.FlightTakeoff
 import androidx.compose.material.icons.rounded.Map
 import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -56,10 +57,7 @@ import com.example.R
 import com.example.ui.DisplayVisit
 import com.example.ui.TripBuddyUiState
 import com.example.ui.components.LocationCard
-import com.example.ui.theme.OceanBlue
-import com.example.ui.theme.OceanDeep
-import com.example.ui.theme.PureWhite
-import com.example.ui.theme.WarmAmber
+import com.example.ui.theme.LocalAppTheme
 import com.example.util.DateUtils
 import java.util.Locale
 
@@ -71,6 +69,7 @@ fun HomeScreen(
     onOpenAddToday: () -> Unit,
     onOpenMapsForVisit: (DisplayVisit) -> Unit,
     onToggleComplete: (DisplayVisit) -> Unit,
+    onTakePhotoForVisit: (DisplayVisit) -> Unit,
     onTestNotificationClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -145,12 +144,43 @@ fun HomeScreen(
                         visit = nearest,
                         nowMillis = uiState.nowMillis,
                         onOpenMapsClick = { onOpenMapsForVisit(nearest) },
-                        onMarkCompletedClick = { onToggleComplete(nearest) }
+                        onMarkCompletedClick = { onToggleComplete(nearest) },
+                        onTakePhotoClick = { onTakePhotoForVisit(nearest) }
                     )
                 } else {
                     EmptyNearestTripCard(
                         onPlanInCalendarClick = onOpenCalendar,
                         onQuickAddClick = onOpenAddToday
+                    )
+                }
+            }
+
+            if (uiState.todayVisits.isNotEmpty()) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Kunjungan Hari Ini",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                        TextButton(onClick = onOpenAddToday) {
+                            Text("+ Tambah")
+                        }
+                    }
+                }
+
+                items(uiState.todayVisits, key = { "today_${it.id}" }) { visit ->
+                    LocationCard(
+                        visit = visit,
+                        showDateBadge = false,
+                        photoCount = uiState.photoCountByVisitId[visit.id] ?: 0,
+                        onOpenMapsClick = { onOpenMapsForVisit(visit) },
+                        onToggleComplete = { onToggleComplete(visit) },
+                        onTakePhotoClick = { onTakePhotoForVisit(visit) }
                     )
                 }
             }
@@ -172,8 +202,8 @@ fun HomeScreen(
                             .testTag("home_stat_upcoming")
                     )
                     StatSummaryCard(
-                        title = "Tempat Dikunjungi",
-                        count = uiState.visitedMemories.size,
+                        title = "Kenangan Tersimpan",
+                        count = uiState.dateMemoryGroups.size,
                         icon = Icons.Rounded.AutoAwesome,
                         tint = MaterialTheme.colorScheme.secondary,
                         containerColor = MaterialTheme.colorScheme.secondaryContainer,
@@ -274,8 +304,10 @@ fun HomeScreen(
                     LocationCard(
                         visit = visit,
                         showDateBadge = true,
+                        photoCount = uiState.photoCountByVisitId[visit.id] ?: 0,
                         onOpenMapsClick = { onOpenMapsForVisit(visit) },
-                        onToggleComplete = { onToggleComplete(visit) }
+                        onToggleComplete = { onToggleComplete(visit) },
+                        onTakePhotoClick = { onTakePhotoForVisit(visit) }
                     )
                 }
             }
@@ -290,8 +322,11 @@ private fun NearestTripCountdownCard(
     visit: DisplayVisit,
     nowMillis: Long,
     onOpenMapsClick: () -> Unit,
-    onMarkCompletedClick: () -> Unit
+    onMarkCompletedClick: () -> Unit,
+    onTakePhotoClick: () -> Unit
 ) {
+    val activeTheme = LocalAppTheme.current
+    val heroTextColor = activeTheme.heroOnColor
     val countdown = DateUtils.computeCountdownParts(
         visitEpochDay = visit.visitDateEpochDay,
         visitHour = visit.visitHour,
@@ -311,7 +346,7 @@ private fun NearestTripCountdownCard(
                 .fillMaxWidth()
                 .background(
                     brush = Brush.linearGradient(
-                        colors = listOf(OceanDeep, OceanBlue)
+                        colors = listOf(activeTheme.heroStart, activeTheme.heroEnd)
                     )
                 )
                 .padding(20.dp)
@@ -323,7 +358,7 @@ private fun NearestTripCountdownCard(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Surface(
-                        color = PureWhite.copy(alpha = 0.18f),
+                        color = heroTextColor.copy(alpha = 0.16f),
                         shape = RoundedCornerShape(20.dp)
                     ) {
                         Row(
@@ -334,13 +369,13 @@ private fun NearestTripCountdownCard(
                             Icon(
                                 imageVector = Icons.Rounded.FlightTakeoff,
                                 contentDescription = null,
-                                tint = PureWhite,
+                                tint = heroTextColor,
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
                                 text = "Trip Terdekat",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = PureWhite
+                                color = heroTextColor
                             )
                         }
                     }
@@ -352,13 +387,21 @@ private fun NearestTripCountdownCard(
                         else -> "${countdown.days} Hari Lagi"
                     }
                     Surface(
-                        color = if (countdown.isToday || countdown.isTomorrow) WarmAmber else PureWhite.copy(alpha = 0.2f),
+                        color = if (countdown.isToday || countdown.isTomorrow) {
+                            MaterialTheme.colorScheme.tertiary
+                        } else {
+                            heroTextColor.copy(alpha = 0.2f)
+                        },
                         shape = RoundedCornerShape(20.dp)
                     ) {
                         Text(
                             text = urgencyLabel,
                             style = MaterialTheme.typography.labelMedium,
-                            color = PureWhite,
+                            color = if (countdown.isToday || countdown.isTomorrow) {
+                                MaterialTheme.colorScheme.onTertiary
+                            } else {
+                                heroTextColor
+                            },
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                         )
@@ -370,7 +413,7 @@ private fun NearestTripCountdownCard(
                         Text(
                             text = visit.tripTitle,
                             style = MaterialTheme.typography.labelLarge,
-                            color = PureWhite.copy(alpha = 0.85f),
+                            color = heroTextColor.copy(alpha = 0.85f),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -378,7 +421,7 @@ private fun NearestTripCountdownCard(
                     Text(
                         text = visit.locationName,
                         style = MaterialTheme.typography.headlineMedium,
-                        color = PureWhite,
+                        color = heroTextColor,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -389,18 +432,17 @@ private fun NearestTripCountdownCard(
                         Icon(
                             imageVector = Icons.Rounded.Schedule,
                             contentDescription = null,
-                            tint = PureWhite.copy(alpha = 0.85f),
+                            tint = heroTextColor.copy(alpha = 0.85f),
                             modifier = Modifier.size(16.dp)
                         )
                         Text(
                             text = "${DateUtils.formatIndonesianFullDate(visit.visitDateEpochDay)} • ${DateUtils.formatTime(visit.visitHour, visit.visitMinute)} WIB",
                             style = MaterialTheme.typography.bodySmall,
-                            color = PureWhite.copy(alpha = 0.9f)
+                            color = heroTextColor.copy(alpha = 0.9f)
                         )
                     }
                 }
 
-                // Countdown Timer Grid
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -408,39 +450,43 @@ private fun NearestTripCountdownCard(
                     CountdownUnitBox(
                         value = countdown.days,
                         label = "Hari",
+                        textColor = heroTextColor,
                         modifier = Modifier.weight(1f)
                     )
                     CountdownUnitBox(
                         value = countdown.hours,
                         label = "Jam",
+                        textColor = heroTextColor,
                         modifier = Modifier.weight(1f)
                     )
                     CountdownUnitBox(
                         value = countdown.minutes,
                         label = "Menit",
+                        textColor = heroTextColor,
                         modifier = Modifier.weight(1f)
                     )
                     CountdownUnitBox(
                         value = countdown.seconds,
                         label = "Detik",
+                        textColor = heroTextColor,
                         modifier = Modifier.weight(1f)
                     )
                 }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Button(
                         onClick = onOpenMapsClick,
                         modifier = Modifier
-                            .weight(1.3f)
+                            .weight(1.2f)
                             .height(48.dp)
                             .testTag("home_nearest_open_maps_button"),
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = PureWhite,
-                            contentColor = OceanDeep
+                            containerColor = MaterialTheme.colorScheme.surface,
+                            contentColor = MaterialTheme.colorScheme.onSurface
                         )
                     ) {
                         Icon(
@@ -450,7 +496,29 @@ private fun NearestTripCountdownCard(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Google Maps",
+                            text = "Maps",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = onTakePhotoClick,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("home_nearest_camera_button"),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, heroTextColor.copy(alpha = 0.65f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = heroTextColor)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PhotoCamera,
+                            contentDescription = stringResource(R.string.cd_take_photo),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Foto",
                             style = MaterialTheme.typography.labelLarge
                         )
                     }
@@ -462,15 +530,15 @@ private fun NearestTripCountdownCard(
                             .height(48.dp)
                             .testTag("home_nearest_complete_button"),
                         shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, PureWhite.copy(alpha = 0.65f)),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = PureWhite)
+                        border = BorderStroke(1.dp, heroTextColor.copy(alpha = 0.65f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = heroTextColor)
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Check,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp)
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = "Selesai",
                             style = MaterialTheme.typography.labelLarge
@@ -486,12 +554,13 @@ private fun NearestTripCountdownCard(
 private fun CountdownUnitBox(
     value: Long,
     label: String,
+    textColor: Color,
     modifier: Modifier = Modifier
 ) {
     Surface(
         modifier = modifier,
         shape = RoundedCornerShape(14.dp),
-        color = PureWhite.copy(alpha = 0.16f)
+        color = textColor.copy(alpha = 0.14f)
     ) {
         Column(
             modifier = Modifier.padding(vertical = 10.dp),
@@ -503,12 +572,12 @@ private fun CountdownUnitBox(
                 style = MaterialTheme.typography.headlineMedium.copy(
                     fontFeatureSettings = "tnum"
                 ),
-                color = PureWhite
+                color = textColor
             )
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelSmall,
-                color = PureWhite.copy(alpha = 0.85f)
+                color = textColor.copy(alpha = 0.85f)
             )
         }
     }
@@ -707,4 +776,3 @@ private fun NotificationTestCard(
         }
     }
 }
-
