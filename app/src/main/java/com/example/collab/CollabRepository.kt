@@ -531,6 +531,147 @@ class CollabRepository(
         }
     }
 
+    suspend fun deleteSharedTrip(tripId: String): Result<Unit> {
+        val path = "trips/$tripId"
+        return try {
+            val uid = requireUserId()
+            require(tripId.isNotBlank())
+            val tripRef = db.collection("trips").document(tripId)
+            val tripSnap = tripRef.get().await()
+            if (!tripSnap.exists()) {
+                return Result.failure(IllegalArgumentException("Grup tidak ditemukan atau sudah dihapus."))
+            }
+            val ownerId = tripSnap.getString("ownerId").orEmpty()
+            if (ownerId != uid) {
+                return Result.failure(IllegalAccessException("Hanya admin pemilik grup yang dapat menghapus grup ini."))
+            }
+            val inviteCode = tripSnap.getString("inviteCode").orEmpty()
+
+            // Firestore does not cascade-delete subcollections automatically.
+            // Delete subcollections first while trips/{tripId} still exists so security rules
+            // checking isTripMember/ownerId on trips/{tripId} remain valid.
+            val subcollectionRefs = buildList {
+                addAll(tripRef.collection("comments").get().await().documents.map { it.reference })
+                addAll(tripRef.collection("visits").get().await().documents.map { it.reference })
+                addAll(tripRef.collection("members").get().await().documents.map { it.reference })
+            }
+            subcollectionRefs.chunked(400).forEach { chunk ->
+                val batch = db.batch()
+                chunk.forEach { ref -> batch.delete(ref) }
+                batch.commit().await()
+            }
+
+            val finalBatch = db.batch()
+            if (inviteCode.isNotBlank()) {
+                finalBatch.delete(db.collection("trip_invites").document(inviteCode))
+            }
+            finalBatch.delete(tripRef)
+            finalBatch.commit().await()
+
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun leaveSharedTrip(tripId: String): Result<Unit> {
+        val path = "trips/$tripId"
+        return try {
+            val uid = requireUserId()
+            require(tripId.isNotBlank())
+            val tripRef = db.collection("trips").document(tripId)
+            val tripSnap = tripRef.get().await()
+            if (!tripSnap.exists()) {
+                return Result.failure(IllegalArgumentException("Grup tidak ditemukan."))
+            }
+            val ownerId = tripSnap.getString("ownerId").orEmpty()
+            if (ownerId == uid) {
+                return Result.failure(
+                    IllegalStateException("Pemilik grup tidak dapat keluar tanpa menghapus grup atau menyerahkan peran admin ke anggota lain.")
+                )
+            }
+
+            val batch = db.batch()
+            batch.delete(tripRef.collection("members").document(uid))
+            batch.update(
+                tripRef,
+                mapOf(
+                    "memberUids" to FieldValue.arrayRemove(uid),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun transferGroupAdmin(tripId: String, newAdminUid: String): Result<Unit> {
+        val path = "trips/$tripId"
+        return try {
+            val uid = requireUserId()
+            require(tripId.isNotBlank() && newAdminUid.isNotBlank())
+            if (newAdminUid == uid) {
+                return Result.failure(IllegalArgumentException("Pilih anggota lain untuk dijadikan admin."))
+            }
+            val tripRef = db.collection("trips").document(tripId)
+            val tripSnap = tripRef.get().await()
+            if (!tripSnap.exists()) {
+                return Result.failure(IllegalArgumentException("Grup tidak ditemukan."))
+            }
+            val ownerId = tripSnap.getString("ownerId").orEmpty()
+            if (ownerId != uid) {
+                return Result.failure(IllegalAccessException("Hanya admin pemilik grup yang dapat menyerahkan peran admin."))
+            }
+            val memberUids = (tripSnap.get("memberUids") as? List<*>)?.filterIsInstance<String>().orEmpty()
+            if (newAdminUid !in memberUids) {
+                return Result.failure(IllegalArgumentException("Pengguna yang dipilih bukan anggota grup ini."))
+            }
+            val inviteCode = tripSnap.getString("inviteCode").orEmpty()
+            val inviteRef = if (inviteCode.isNotBlank()) {
+                db.collection("trip_invites").document(inviteCode).takeIf { it.get().await().exists() }
+            } else {
+                null
+            }
+
+            val batch = db.batch()
+            batch.update(
+                tripRef,
+                mapOf(
+                    "ownerId" to newAdminUid,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                tripRef.collection("members").document(newAdminUid),
+                mapOf("role" to "owner")
+            )
+            batch.update(
+                tripRef.collection("members").document(uid),
+                mapOf("role" to "member")
+            )
+            if (inviteRef != null) {
+                batch.update(inviteRef, mapOf("ownerId" to newAdminUid))
+            }
+            batch.commit().await()
+
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
     private suspend fun generateUniqueInviteCode(): String {
         val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         val random = SecureRandom()

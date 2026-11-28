@@ -3,7 +3,6 @@ package com.example.ui.screens
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,27 +15,35 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DateRange
+import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.TabRowDefaults
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -52,7 +59,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.R
-import com.example.data.Trip
+import com.example.ui.GroupMemorySummary
+import com.example.ui.MemoriesFilterTab
 import com.example.ui.TripBuddyUiState
 import com.example.ui.VisitMemoryItem
 import com.example.ui.components.MemoryPhotoPlaceholder
@@ -64,11 +72,27 @@ fun MemoriesScreen(
     uiState: TripBuddyUiState,
     onBackToHome: () -> Unit,
     onSearchQueryChange: (String) -> Unit,
-    onTripFilterChange: (String?) -> Unit,
+    onMemoriesTabChange: (MemoriesFilterTab) -> Unit,
+    onSelectMemoryGroup: (String?) -> Unit,
     onVisitMemoryClick: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    BackHandler(onBack = onBackToHome)
+    val isInsideGroupDetail = uiState.selectedMemoriesTab == MemoriesFilterTab.GRUP &&
+        uiState.selectedMemoryGroupId != null
+
+    BackHandler {
+        if (isInsideGroupDetail) {
+            onSelectMemoryGroup(null)
+        } else {
+            onBackToHome()
+        }
+    }
+
+    val tabs = listOf(
+        MemoriesFilterTab.SEMUA to "Semua",
+        MemoriesFilterTab.PRIBADI to "Pribadi",
+        MemoriesFilterTab.GRUP to "Grup"
+    )
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -97,9 +121,19 @@ fun MemoriesScreen(
                             color = MaterialTheme.colorScheme.onBackground
                         )
                         Text(
-                            text = "Semua foto & catatan dari ruang Pribadi dan trip bersama",
+                            text = when (uiState.selectedMemoriesTab) {
+                                MemoriesFilterTab.SEMUA -> "Semua kenangan pribadi & grup dari terbaru"
+                                MemoriesFilterTab.PRIBADI -> "Kenangan pribadi hanya di perangkat ini"
+                                MemoriesFilterTab.GRUP -> if (isInsideGroupDetail) {
+                                    "Kenangan di grup ${uiState.selectedMemoryGroupSummary?.trip?.name.orEmpty()}"
+                                } else {
+                                    "Daftar semua grup yang pernah diikuti"
+                                }
+                            },
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     Surface(
@@ -127,114 +161,166 @@ fun MemoriesScreen(
                 }
             }
 
-            if (uiState.visitMemories.isNotEmpty() || uiState.allTrips.size > 1) {
-                item {
-                    OutlinedTextField(
-                        value = uiState.memorySearchQuery,
-                        onValueChange = onSearchQueryChange,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("memories_search_input"),
-                        placeholder = { Text("Cari lokasi, nama trip, tanggal, atau deskripsi...") },
-                        singleLine = true,
-                        shape = RoundedCornerShape(16.dp),
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Rounded.Search,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        },
-                        trailingIcon = {
-                            if (uiState.memorySearchQuery.isNotEmpty()) {
-                                IconButton(
-                                    onClick = { onSearchQueryChange("") },
-                                    modifier = Modifier.size(48.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Close,
-                                        contentDescription = "Hapus pencarian"
-                                    )
-                                }
-                            }
-                        },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                            focusedContainerColor = MaterialTheme.colorScheme.surface,
-                            unfocusedContainerColor = MaterialTheme.colorScheme.surface
-                        )
-                    )
-                }
-
-                item {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        FilterChip(
-                            selected = uiState.selectedMemoryTripId == null,
-                            onClick = { onTripFilterChange(null) },
-                            label = { Text("Semua (${uiState.visitMemories.size})") },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                selectedLabelColor = MaterialTheme.colorScheme.primary
-                            ),
-                            modifier = Modifier.testTag("memories_filter_all")
-                        )
-
-                        val personalCount = uiState.visitMemories.count { it.trip.isPersonal }
-                        FilterChip(
-                            selected = uiState.selectedMemoryTripId == Trip.PERSONAL_TRIP_ID,
-                            onClick = { onTripFilterChange(Trip.PERSONAL_TRIP_ID) },
-                            label = { Text("Pribadi ($personalCount)") },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                selectedLabelColor = MaterialTheme.colorScheme.primary
-                            ),
-                            modifier = Modifier.testTag("memories_filter_personal")
-                        )
-
-                        uiState.allTrips
-                            .filter { !it.isPersonal }
-                            .forEach { trip ->
-                                val count = uiState.visitMemories.count { it.trip.id == trip.id }
-                                FilterChip(
-                                    selected = uiState.selectedMemoryTripId == trip.id,
-                                    onClick = { onTripFilterChange(trip.id) },
-                                    label = { Text("${trip.name} ($count)") },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                        selectedLabelColor = MaterialTheme.colorScheme.primary
-                                    ),
-                                    modifier = Modifier.testTag("memories_filter_trip_${trip.id}")
+            item {
+                val selectedIndex = tabs.indexOfFirst { it.first == uiState.selectedMemoriesTab }.coerceAtLeast(0)
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    TabRow(
+                        selectedTabIndex = selectedIndex,
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        contentColor = MaterialTheme.colorScheme.primary,
+                        divider = {},
+                        indicator = { tabPositions ->
+                            if (selectedIndex in tabPositions.indices) {
+                                TabRowDefaults.SecondaryIndicator(
+                                    modifier = Modifier.tabIndicatorOffset(tabPositions[selectedIndex]),
+                                    height = 3.dp,
+                                    color = MaterialTheme.colorScheme.primary
                                 )
                             }
+                        }
+                    ) {
+                        tabs.forEach { (tab, label) ->
+                            val selected = uiState.selectedMemoriesTab == tab
+                            val tag = when (tab) {
+                                MemoriesFilterTab.SEMUA -> "memories_tab_semua"
+                                MemoriesFilterTab.PRIBADI -> "memories_tab_pribadi"
+                                MemoriesFilterTab.GRUP -> "memories_tab_grup"
+                            }
+                            Tab(
+                                selected = selected,
+                                onClick = {
+                                    if (tab == MemoriesFilterTab.GRUP && selected && isInsideGroupDetail) {
+                                        onSelectMemoryGroup(null)
+                                    } else {
+                                        onMemoriesTabChange(tab)
+                                    }
+                                },
+                                text = {
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        maxLines = 1
+                                    )
+                                },
+                                selectedContentColor = MaterialTheme.colorScheme.primary,
+                                unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag(tag)
+                            )
+                        }
                     }
                 }
             }
 
-            if (uiState.visitMemories.isEmpty()) {
+            if (isInsideGroupDetail && uiState.selectedMemoryGroupSummary != null) {
                 item {
-                    EmptyMemoriesCard()
+                    SelectedGroupMemoriesHeader(
+                        summary = uiState.selectedMemoryGroupSummary,
+                        onBackToGroupList = { onSelectMemoryGroup(null) }
+                    )
+                }
+            }
+
+            item {
+                OutlinedTextField(
+                    value = uiState.memorySearchQuery,
+                    onValueChange = onSearchQueryChange,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("memories_search_input"),
+                    placeholder = {
+                        Text(
+                            if (uiState.selectedMemoriesTab == MemoriesFilterTab.GRUP && !isInsideGroupDetail) {
+                                "Cari nama grup atau rentang tanggal..."
+                            } else {
+                                "Cari lokasi, nama trip, tanggal, atau deskripsi..."
+                            }
+                        )
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Rounded.Search,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    },
+                    trailingIcon = {
+                        if (uiState.memorySearchQuery.isNotEmpty()) {
+                            IconButton(
+                                onClick = { onSearchQueryChange("") },
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = "Hapus pencarian"
+                                )
+                            }
+                        }
+                    },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                    )
+                )
+            }
+
+            if (uiState.selectedMemoriesTab == MemoriesFilterTab.GRUP && !isInsideGroupDetail) {
+                if (uiState.groupMemorySummaries.isEmpty()) {
+                    item {
+                        EmptyGroupMemoriesCard(hasSearchQuery = uiState.memorySearchQuery.isNotBlank())
+                    }
+                } else {
+                    items(
+                        items = uiState.groupMemorySummaries,
+                        key = { "group_summary_${it.trip.id}" }
+                    ) { summary ->
+                        GroupMemoryFolderCard(
+                            summary = summary,
+                            onClick = { onSelectMemoryGroup(summary.trip.id) }
+                        )
+                    }
                 }
             } else if (uiState.filteredVisitMemories.isEmpty()) {
+                val hasMemoriesOverall = when (uiState.selectedMemoriesTab) {
+                    MemoriesFilterTab.SEMUA -> uiState.visitMemories.isNotEmpty()
+                    MemoriesFilterTab.PRIBADI -> uiState.visitMemories.any { it.trip.isPersonal }
+                    MemoriesFilterTab.GRUP -> (uiState.selectedMemoryGroupSummary?.memoryCount ?: 0) > 0
+                }
                 item {
-                    Surface(
-                        shape = RoundedCornerShape(18.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = "Tidak ada kenangan yang cocok dengan filter atau pencarian Anda.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(24.dp)
+                    if (!hasMemoriesOverall && uiState.memorySearchQuery.isBlank()) {
+                        EmptyMemoriesCard(
+                            title = when (uiState.selectedMemoriesTab) {
+                                MemoriesFilterTab.PRIBADI -> "Belum Ada Kenangan Pribadi"
+                                MemoriesFilterTab.GRUP -> "Belum Ada Kenangan di Grup Ini"
+                                MemoriesFilterTab.SEMUA -> "Belum Ada Kenangan Tersimpan"
+                            }
                         )
+                    } else {
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "Tidak ada kenangan yang cocok dengan filter atau pencarian Anda.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(24.dp)
+                            )
+                        }
                     }
                 }
             } else {
@@ -267,6 +353,280 @@ fun MemoriesScreen(
             }
 
             item { Spacer(modifier = Modifier.height(72.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun SelectedGroupMemoriesHeader(
+    summary: GroupMemorySummary,
+    onBackToGroupList: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.55f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.35f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("memories_selected_group_header")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                OutlinedButton(
+                    onClick = onBackToGroupList,
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("memories_group_back_button"),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "Kembali ke daftar grup",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Semua Grup")
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surface
+                ) {
+                    Text(
+                        text = "${summary.memoryCount} kenangan",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+            }
+
+            Text(
+                text = summary.trip.name,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            Text(
+                text = "${summary.dateRangeLabel} • ${summary.photoCount} foto",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+        }
+    }
+}
+
+@Composable
+private fun GroupMemoryFolderCard(
+    summary: GroupMemorySummary,
+    onClick: () -> Unit
+) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("memory_group_card_${summary.trip.id}"),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+            ) {
+                val coverFile = summary.coverPhotoPath?.let { File(it) }?.takeIf { it.exists() }
+                if (coverFile != null) {
+                    AsyncImage(
+                        model = coverFile,
+                        contentDescription = "Sampul grup ${summary.trip.name}",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    MemoryPhotoPlaceholder(subtitle = null)
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.92f),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Groups,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "Grup",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PhotoLibrary,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "${summary.memoryCount} kenangan",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    modifier = Modifier.size(44.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Rounded.Groups,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = summary.trip.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.DateRange,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = summary.dateRangeLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Text(
+                        text = "${summary.memoryCount} kenangan • ${summary.photoCount} foto",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Icon(
+                    imageVector = Icons.Rounded.ChevronRight,
+                    contentDescription = "Buka kenangan grup ${summary.trip.name}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyGroupMemoriesCard(hasSearchQuery: Boolean) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("memories_empty_group_list")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Groups,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.tertiary,
+                modifier = Modifier.size(40.dp)
+            )
+            Text(
+                text = if (hasSearchQuery) {
+                    "Grup Tidak Ditemukan"
+                } else {
+                    "Belum Ada Grup yang Diikuti"
+                },
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = if (hasSearchQuery) {
+                    "Coba kata kunci nama grup atau tanggal lain."
+                } else {
+                    "Buat grup baru atau gabung dengan kode di tab Grup pada bagian atas layar untuk melihat album kenangan grup di sini."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }
@@ -412,7 +772,9 @@ private fun VisitMemoryThumbnailCard(
 }
 
 @Composable
-private fun EmptyMemoriesCard() {
+private fun EmptyMemoriesCard(
+    title: String = "Belum Ada Kenangan Tersimpan"
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -438,7 +800,7 @@ private fun EmptyMemoriesCard() {
                 contentScale = ContentScale.Crop
             )
             Text(
-                text = "Belum Ada Kenangan Tersimpan",
+                text = title,
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface,
                 textAlign = TextAlign.Center

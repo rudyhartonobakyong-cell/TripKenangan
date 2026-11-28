@@ -50,6 +50,17 @@ enum class TripTab {
     KENANGAN
 }
 
+enum class SpaceMode {
+    PRIBADI,
+    GRUP
+}
+
+enum class MemoriesFilterTab {
+    SEMUA,
+    PRIBADI,
+    GRUP
+}
+
 sealed interface Workspace {
     data object Local : Workspace
     data class Shared(val tripId: String) : Workspace
@@ -70,6 +81,15 @@ data class VisitMemoryItem(
     fun toDisplayVisit(): DisplayVisit = DisplayVisit.fromKunjungan(kunjungan, trip.name)
 }
 
+data class GroupMemorySummary(
+    val trip: Trip,
+    val dateRangeLabel: String,
+    val memoryCount: Int,
+    val photoCount: Int,
+    val coverPhotoPath: String?,
+    val latestSortKey: Long
+)
+
 private data class ActiveTripCollabData(
     val visits: List<SharedVisit> = emptyList(),
     val members: List<TripMember> = emptyList(),
@@ -86,11 +106,14 @@ private data class RoomBaseSnapshot(
 
 private data class NavAndModalState(
     val selectedTab: TripTab = TripTab.BERANDA,
+    val spaceMode: SpaceMode = SpaceMode.PRIBADI,
+    val showGroupDirectory: Boolean = false,
     val activeWorkspace: Workspace = Workspace.Local,
     val currentYear: Int = DateUtils.currentYearAndMonth().first,
     val currentMonth: Int = DateUtils.currentYearAndMonth().second,
     val selectedDateEpochDay: Long = DateUtils.todayEpochDay(),
-    val selectedMemoryTripId: String? = null,
+    val selectedMemoriesTab: MemoriesFilterTab = MemoriesFilterTab.SEMUA,
+    val selectedMemoryGroupId: String? = null,
     val memorySearchQuery: String = "",
     val activeMapsVisit: DisplayVisit? = null,
     val activeAddEditDateEpochDay: Long? = null,
@@ -119,6 +142,9 @@ data class TripBuddyUiState(
     val activeProjectId: String = "",
     val activeDatabaseId: String = "",
     val selectedTab: TripTab = TripTab.BERANDA,
+    val spaceMode: SpaceMode = SpaceMode.PRIBADI,
+    val showGroupDirectory: Boolean = false,
+    val activeSpaceTitle: String = "Pribadi - hanya di HP ini",
     val activeWorkspace: Workspace = Workspace.Local,
     val allTrips: List<Trip> = emptyList(),
     val sharedTrips: List<SharedTrip> = emptyList(),
@@ -138,9 +164,12 @@ data class TripBuddyUiState(
     val nearestTrip: DisplayVisit? = null,
     val visitMemories: List<VisitMemoryItem> = emptyList(),
     val filteredVisitMemories: List<VisitMemoryItem> = emptyList(),
+    val groupMemorySummaries: List<GroupMemorySummary> = emptyList(),
+    val selectedMemoryGroupSummary: GroupMemorySummary? = null,
     val photoCountByVisitId: Map<String, Int> = emptyMap(),
     val activeVisitMemoryDetail: VisitMemoryItem? = null,
-    val selectedMemoryTripId: String? = null,
+    val selectedMemoriesTab: MemoriesFilterTab = MemoriesFilterTab.SEMUA,
+    val selectedMemoryGroupId: String? = null,
     val memorySearchQuery: String = "",
     val visitsOnSelectedDate: List<DisplayVisit> = emptyList(),
     val upcomingDatesInMonth: Set<Long> = emptySet(),
@@ -229,6 +258,16 @@ class TripBuddyViewModel(
         .onEach { trips ->
             lastSyncedSharedTrips.value = trips
             localRepository.syncSharedTripsToRoom(trips)
+            val currentSharedId = (navAndModalState.value.activeWorkspace as? Workspace.Shared)?.tripId
+            if (currentSharedId != null && trips.none { it.id == currentSharedId }) {
+                navAndModalState.update { state ->
+                    state.copy(
+                        activeWorkspace = Workspace.Local,
+                        showMembersScreen = false,
+                        showGroupDirectory = state.spaceMode == SpaceMode.GRUP
+                    )
+                }
+            }
         }
         .catch { error ->
             val firestoreError = extractFirestoreException(error)
@@ -383,20 +422,30 @@ class TripBuddyViewModel(
                     .thenBy { it.visitMinute }
             )
 
+        val allGroupSummaries = buildGroupMemorySummaries(
+            roomTrips = room.allTrips,
+            sharedTrips = sharedTrips,
+            allKunjungan = room.allKunjungan,
+            memoryItems = room.memoryItems
+        )
         val queryLower = nav.memorySearchQuery.trim().lowercase()
-        val filteredVisitMemories = room.memoryItems.filter { item ->
-            val matchesTrip = nav.selectedMemoryTripId == null || item.trip.id == nav.selectedMemoryTripId
-            val matchesSearch = if (queryLower.isEmpty()) {
-                true
-            } else {
-                item.kunjungan.locationName.lowercase().contains(queryLower) ||
-                    item.trip.name.lowercase().contains(queryLower) ||
-                    item.kunjungan.tripTitle.lowercase().contains(queryLower) ||
-                    item.descriptionSnippet.lowercase().contains(queryLower) ||
-                    DateUtils.formatIndonesianFullDate(item.kunjungan.visitDateEpochDay).lowercase().contains(queryLower)
+        val filteredGroupSummaries = if (queryLower.isEmpty()) {
+            allGroupSummaries
+        } else {
+            allGroupSummaries.filter { summary ->
+                summary.trip.name.lowercase().contains(queryLower) ||
+                    summary.dateRangeLabel.lowercase().contains(queryLower)
             }
-            matchesTrip && matchesSearch
         }
+        val selectedMemoryGroupSummary = nav.selectedMemoryGroupId?.let { groupId ->
+            allGroupSummaries.find { it.trip.id == groupId }
+        }
+        val filteredVisitMemories = filterMemoriesForTab(
+            memoryItems = room.memoryItems,
+            selectedTab = nav.selectedMemoriesTab,
+            selectedGroupId = selectedMemoryGroupSummary?.trip?.id ?: nav.selectedMemoryGroupId,
+            searchQuery = nav.memorySearchQuery
+        )
 
         val selectedVisits = visits.filter { it.visitDateEpochDay == nav.selectedDateEpochDay }
 
@@ -435,6 +484,14 @@ class TripBuddyViewModel(
             sharedTrips.find { it.id == current.id } ?: current
         }
 
+        val activeSpaceTitle = formatActiveSpaceTitle(
+            spaceMode = nav.spaceMode,
+            showGroupDirectory = nav.showGroupDirectory,
+            activeSharedTrip = activeSharedTrip,
+            memberCount = activeSharedTrip?.let { maxOf(collabData.members.size, it.memberUids.size) } ?: 0,
+            totalGroups = sharedTrips.size
+        )
+
         TripBuddyUiState(
             currentUserId = currentUserId,
             currentUserName = currentUserName,
@@ -443,6 +500,9 @@ class TripBuddyViewModel(
             activeProjectId = collabRepository.getActiveProjectId(),
             activeDatabaseId = collabRepository.getActiveDatabaseId(),
             selectedTab = nav.selectedTab,
+            spaceMode = nav.spaceMode,
+            showGroupDirectory = nav.showGroupDirectory,
+            activeSpaceTitle = activeSpaceTitle,
             activeWorkspace = nav.activeWorkspace,
             allTrips = room.allTrips,
             sharedTrips = sharedTrips,
@@ -462,9 +522,12 @@ class TripBuddyViewModel(
             nearestTrip = upcoming.firstOrNull(),
             visitMemories = room.memoryItems,
             filteredVisitMemories = filteredVisitMemories,
+            groupMemorySummaries = filteredGroupSummaries,
+            selectedMemoryGroupSummary = selectedMemoryGroupSummary,
             photoCountByVisitId = photoCountByVisitId,
             activeVisitMemoryDetail = room.activeDetail,
-            selectedMemoryTripId = nav.selectedMemoryTripId,
+            selectedMemoriesTab = nav.selectedMemoriesTab,
+            selectedMemoryGroupId = selectedMemoryGroupSummary?.trip?.id,
             memorySearchQuery = nav.memorySearchQuery,
             visitsOnSelectedDate = selectedVisits,
             upcomingDatesInMonth = upcomingDates,
@@ -500,6 +563,30 @@ class TripBuddyViewModel(
     )
 
     fun selectTab(tab: TripTab) {
+        val current = navAndModalState.value
+        if (current.spaceMode == SpaceMode.GRUP && current.showGroupDirectory) {
+            if (current.activeWorkspace is Workspace.Shared || tab == TripTab.KENANGAN) {
+                navAndModalState.update {
+                    it.copy(
+                        selectedTab = tab,
+                        showGroupDirectory = false,
+                        showMembersScreen = false,
+                        activeMemoryVisitId = null
+                    )
+                }
+            } else {
+                navAndModalState.update {
+                    it.copy(
+                        selectedTab = tab,
+                        showGroupDirectory = true,
+                        showMembersScreen = false,
+                        activeMemoryVisitId = null
+                    )
+                }
+                _snackbarEvents.trySend("Pilih, buat, atau gabung grup terlebih dahulu")
+            }
+            return
+        }
         navAndModalState.update {
             it.copy(
                 selectedTab = tab,
@@ -509,9 +596,69 @@ class TripBuddyViewModel(
         }
     }
 
+    fun selectSpaceMode(mode: SpaceMode) {
+        when (mode) {
+            SpaceMode.PRIBADI -> {
+                navAndModalState.update {
+                    it.copy(
+                        spaceMode = SpaceMode.PRIBADI,
+                        showGroupDirectory = false,
+                        activeWorkspace = Workspace.Local,
+                        showMembersScreen = false,
+                        activeMapsVisit = null,
+                        activeAddEditDateEpochDay = null,
+                        editingVisit = null
+                    )
+                }
+            }
+
+            SpaceMode.GRUP -> {
+                navAndModalState.update {
+                    it.copy(
+                        spaceMode = SpaceMode.GRUP,
+                        showGroupDirectory = true,
+                        showMembersScreen = false,
+                        activeMapsVisit = null,
+                        activeAddEditDateEpochDay = null,
+                        editingVisit = null
+                    )
+                }
+            }
+        }
+    }
+
+    fun openGroupDirectory() {
+        navAndModalState.update {
+            it.copy(
+                spaceMode = SpaceMode.GRUP,
+                showGroupDirectory = true,
+                showMembersScreen = false,
+                activeMapsVisit = null,
+                activeAddEditDateEpochDay = null,
+                editingVisit = null
+            )
+        }
+    }
+
+    fun selectGroupTrip(trip: SharedTrip, openMembersPage: Boolean = false) {
+        navAndModalState.update {
+            it.copy(
+                spaceMode = SpaceMode.GRUP,
+                showGroupDirectory = false,
+                activeWorkspace = Workspace.Shared(trip.id),
+                showMembersScreen = openMembersPage,
+                activeMapsVisit = null,
+                activeAddEditDateEpochDay = null,
+                editingVisit = null
+            )
+        }
+    }
+
     fun selectWorkspace(workspace: Workspace) {
         navAndModalState.update {
             it.copy(
+                spaceMode = if (workspace is Workspace.Shared) SpaceMode.GRUP else SpaceMode.PRIBADI,
+                showGroupDirectory = false,
                 activeWorkspace = workspace,
                 showMembersScreen = false,
                 activeMapsVisit = null,
@@ -550,13 +697,15 @@ class TripBuddyViewModel(
                         isSubmittingCollab = false,
                         showCreateTripDialog = false,
                         createTripError = null,
+                        spaceMode = SpaceMode.GRUP,
+                        showGroupDirectory = false,
                         activeWorkspace = Workspace.Shared(trip.id),
                         showInviteSheetForTrip = trip
                     )
                 }
-                _snackbarEvents.trySend("Trip bersama \"${trip.title}\" berhasil dibuat")
+                _snackbarEvents.trySend("Grup \"${trip.title}\" berhasil dibuat")
             }.onFailure { error ->
-                val errorText = extractErrorMessage(error, "Gagal membuat trip bersama.")
+                val errorText = extractErrorMessage(error, "Gagal membuat grup.")
                 navAndModalState.update {
                     it.copy(
                         isSubmittingCollab = false,
@@ -601,11 +750,13 @@ class TripBuddyViewModel(
                         showJoinTripDialog = false,
                         joinTripPrefillCode = "",
                         joinTripError = null,
+                        spaceMode = SpaceMode.GRUP,
+                        showGroupDirectory = false,
                         activeWorkspace = Workspace.Shared(tripId),
                         selectedTab = TripTab.KALENDER
                     )
                 }
-                _snackbarEvents.trySend("Berhasil bergabung ke trip bersama!")
+                _snackbarEvents.trySend("Berhasil bergabung ke grup!")
             }.onFailure { error ->
                 navAndModalState.update {
                     it.copy(
@@ -633,6 +784,92 @@ class TripBuddyViewModel(
 
     fun closeMembersScreen() {
         navAndModalState.update { it.copy(showMembersScreen = false) }
+    }
+
+    fun deleteSharedTrip(trip: SharedTrip) {
+        if (trip.ownerId != currentUserId) {
+            _snackbarEvents.trySend("Hanya admin pemilik grup yang dapat menghapus grup.")
+            return
+        }
+        navAndModalState.update { it.copy(isSubmittingCollab = true) }
+        viewModelScope.launch {
+            val visitIdsToCancel = localRepository.getKunjunganIdsForSharedTrip(trip.id)
+            val result = collabRepository.deleteSharedTrip(trip.id)
+            result.onSuccess {
+                visitIdsToCancel.forEach { alarmScheduler.cancelVisitReminder(it) }
+                localRepository.cleanupRemovedSharedTripCache(trip.id)
+                lastSyncedSharedTrips.update { list -> list.filterNot { it.id == trip.id } }
+                navAndModalState.update {
+                    it.copy(
+                        isSubmittingCollab = false,
+                        showMembersScreen = false,
+                        showInviteSheetForTrip = if (it.showInviteSheetForTrip?.id == trip.id) null else it.showInviteSheetForTrip,
+                        activeWorkspace = Workspace.Local,
+                        spaceMode = SpaceMode.GRUP,
+                        showGroupDirectory = true
+                    )
+                }
+                _snackbarEvents.trySend("Grup \"${trip.title}\" telah dihapus permanen")
+            }.onFailure { error ->
+                navAndModalState.update { it.copy(isSubmittingCollab = false) }
+                _snackbarEvents.trySend(extractErrorMessage(error, "Gagal menghapus grup."))
+            }
+        }
+    }
+
+    fun leaveSharedTrip(trip: SharedTrip) {
+        if (trip.ownerId == currentUserId) {
+            _snackbarEvents.trySend("Pemilik tidak dapat keluar tanpa menghapus grup atau menyerahkan peran admin.")
+            return
+        }
+        navAndModalState.update { it.copy(isSubmittingCollab = true) }
+        viewModelScope.launch {
+            val visitIdsToCancel = localRepository.getKunjunganIdsForSharedTrip(trip.id)
+            val result = collabRepository.leaveSharedTrip(trip.id)
+            result.onSuccess {
+                visitIdsToCancel.forEach { alarmScheduler.cancelVisitReminder(it) }
+                localRepository.cleanupRemovedSharedTripCache(trip.id)
+                lastSyncedSharedTrips.update { list -> list.filterNot { it.id == trip.id } }
+                navAndModalState.update {
+                    it.copy(
+                        isSubmittingCollab = false,
+                        showMembersScreen = false,
+                        showInviteSheetForTrip = if (it.showInviteSheetForTrip?.id == trip.id) null else it.showInviteSheetForTrip,
+                        activeWorkspace = Workspace.Local,
+                        spaceMode = SpaceMode.GRUP,
+                        showGroupDirectory = true
+                    )
+                }
+                _snackbarEvents.trySend("Anda telah keluar dari grup \"${trip.title}\"")
+            }.onFailure { error ->
+                navAndModalState.update { it.copy(isSubmittingCollab = false) }
+                _snackbarEvents.trySend(extractErrorMessage(error, "Gagal keluar dari grup."))
+            }
+        }
+    }
+
+    fun transferGroupAdmin(trip: SharedTrip, newAdmin: TripMember) {
+        if (trip.ownerId != currentUserId) {
+            _snackbarEvents.trySend("Hanya admin pemilik grup yang dapat menyerahkan peran admin.")
+            return
+        }
+        if (newAdmin.uid == currentUserId) return
+        navAndModalState.update { it.copy(isSubmittingCollab = true) }
+        viewModelScope.launch {
+            val result = collabRepository.transferGroupAdmin(trip.id, newAdmin.uid)
+            result.onSuccess {
+                lastSyncedSharedTrips.update { list ->
+                    list.map { item ->
+                        if (item.id == trip.id) item.copy(ownerId = newAdmin.uid) else item
+                    }
+                }
+                navAndModalState.update { it.copy(isSubmittingCollab = false) }
+                _snackbarEvents.trySend("Peran admin diserahkan ke ${newAdmin.displayName}")
+            }.onFailure { error ->
+                navAndModalState.update { it.copy(isSubmittingCollab = false) }
+                _snackbarEvents.trySend(extractErrorMessage(error, "Gagal menyerahkan peran admin."))
+            }
+        }
     }
 
     fun openAccountSheet() {
@@ -783,8 +1020,22 @@ class TripBuddyViewModel(
         navAndModalState.update { it.copy(activeMapsVisit = null) }
     }
 
-    fun setMemoryTripFilter(tripId: String?) {
-        navAndModalState.update { it.copy(selectedMemoryTripId = tripId) }
+    fun selectMemoriesTab(tab: MemoriesFilterTab) {
+        navAndModalState.update {
+            it.copy(
+                selectedMemoriesTab = tab,
+                selectedMemoryGroupId = if (tab == MemoriesFilterTab.GRUP) it.selectedMemoryGroupId else null
+            )
+        }
+    }
+
+    fun selectMemoryGroup(tripId: String?) {
+        navAndModalState.update {
+            it.copy(
+                selectedMemoriesTab = MemoriesFilterTab.GRUP,
+                selectedMemoryGroupId = tripId
+            )
+        }
     }
 
     fun setMemorySearchQuery(query: String) {
@@ -1071,6 +1322,131 @@ class TripBuddyViewModel(
     }
 
     companion object {
+        fun formatActiveSpaceTitle(
+            spaceMode: SpaceMode,
+            showGroupDirectory: Boolean,
+            activeSharedTrip: SharedTrip?,
+            memberCount: Int,
+            totalGroups: Int
+        ): String {
+            return when (spaceMode) {
+                SpaceMode.PRIBADI -> "Pribadi - hanya di HP ini"
+                SpaceMode.GRUP -> {
+                    if (!showGroupDirectory && activeSharedTrip != null) {
+                        "Grup: ${activeSharedTrip.title} - $memberCount anggota"
+                    } else if (totalGroups > 0) {
+                        "Grup - $totalGroups grup tersedia"
+                    } else {
+                        "Grup - belum ada grup"
+                    }
+                }
+            }
+        }
+
+        fun canDeleteGroup(trip: SharedTrip, userId: String): Boolean =
+            userId.isNotBlank() && trip.ownerId == userId
+
+        fun canLeaveGroupDirectly(trip: SharedTrip, userId: String): Boolean =
+            userId.isNotBlank() && trip.ownerId != userId && userId in trip.memberUids
+
+        fun isValidDeleteGroupConfirmation(typedName: String, groupName: String): Boolean =
+            groupName.isNotBlank() && typedName.trim() == groupName.trim()
+
+        fun formatDateRange(epochDays: List<Long>): String {
+            if (epochDays.isEmpty()) return "Belum ada tanggal kunjungan"
+            val minDay = epochDays.min()
+            val maxDay = epochDays.max()
+            return if (minDay == maxDay) {
+                DateUtils.formatIndonesianShortDate(minDay)
+            } else {
+                "${DateUtils.formatIndonesianShortDate(minDay)} – ${DateUtils.formatIndonesianShortDate(maxDay)}"
+            }
+        }
+
+        fun buildGroupMemorySummaries(
+            roomTrips: List<Trip>,
+            sharedTrips: List<SharedTrip>,
+            allKunjungan: List<Kunjungan>,
+            memoryItems: List<VisitMemoryItem>
+        ): List<GroupMemorySummary> {
+            val groupTripsById = LinkedHashMap<String, Trip>()
+            roomTrips.filter { !it.isPersonal }.forEach { trip ->
+                groupTripsById[trip.id] = trip
+            }
+            sharedTrips.forEach { shared ->
+                val uuid = Trip.sharedTripUuid(shared.id)
+                if (!groupTripsById.containsKey(uuid)) {
+                    groupTripsById[uuid] = Trip(
+                        id = uuid,
+                        name = shared.title.ifBlank { "Trip Bersama" },
+                        isPersonal = false,
+                        remoteTripId = shared.id,
+                        createdAtMillis = shared.createdAt?.toDate()?.time ?: 0L
+                    )
+                }
+            }
+
+            return groupTripsById.values.map { trip ->
+                val groupVisits = allKunjungan.filter { it.tripId == trip.id }
+                val groupMemories = memoryItems.filter { it.trip.id == trip.id }
+                val allDays = (groupVisits.map { it.visitDateEpochDay } +
+                    groupMemories.map { it.kunjungan.visitDateEpochDay }).distinct()
+
+                val chronologicalMemories = groupMemories.sortedWith(
+                    compareBy<VisitMemoryItem> { it.kunjungan.visitDateEpochDay }
+                        .thenBy { it.kunjungan.visitHour }
+                        .thenBy { it.kunjungan.visitMinute }
+                        .thenBy { it.kunjungan.createdAtMillis }
+                )
+                val firstPhotoPath = chronologicalMemories
+                    .firstNotNullOfOrNull { item -> item.fotos.firstOrNull()?.filePath }
+
+                val totalPhotos = groupMemories.sumOf { it.fotos.size }
+
+                val latestVisitKey = (groupMemories.map { it.kunjungan } + groupVisits)
+                    .maxOfOrNull { k ->
+                        k.visitDateEpochDay * 86_400_000L + k.visitHour * 3_600_000L + k.visitMinute * 60_000L
+                    } ?: trip.createdAtMillis
+
+                GroupMemorySummary(
+                    trip = trip,
+                    dateRangeLabel = formatDateRange(allDays),
+                    memoryCount = groupMemories.size,
+                    photoCount = totalPhotos,
+                    coverPhotoPath = firstPhotoPath,
+                    latestSortKey = latestVisitKey
+                )
+            }.sortedWith(
+                compareByDescending<GroupMemorySummary> { it.latestSortKey }
+                    .thenBy { it.trip.name.lowercase() }
+            )
+        }
+
+        fun filterMemoriesForTab(
+            memoryItems: List<VisitMemoryItem>,
+            selectedTab: MemoriesFilterTab,
+            selectedGroupId: String?,
+            searchQuery: String
+        ): List<VisitMemoryItem> {
+            val base = when (selectedTab) {
+                MemoriesFilterTab.SEMUA -> memoryItems
+                MemoriesFilterTab.PRIBADI -> memoryItems.filter { it.trip.isPersonal }
+                MemoriesFilterTab.GRUP -> {
+                    if (selectedGroupId == null) emptyList()
+                    else memoryItems.filter { it.trip.id == selectedGroupId }
+                }
+            }
+            val queryLower = searchQuery.trim().lowercase()
+            if (queryLower.isEmpty()) return base
+            return base.filter { item ->
+                item.kunjungan.locationName.lowercase().contains(queryLower) ||
+                    item.trip.name.lowercase().contains(queryLower) ||
+                    item.kunjungan.tripTitle.lowercase().contains(queryLower) ||
+                    item.descriptionSnippet.lowercase().contains(queryLower) ||
+                    DateUtils.formatIndonesianFullDate(item.kunjungan.visitDateEpochDay).lowercase().contains(queryLower)
+            }
+        }
+
         fun findClosestVisitToNow(
             todayVisits: List<DisplayVisit>,
             nowMillis: Long

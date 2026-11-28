@@ -81,7 +81,7 @@ fun CreateSharedTripDialog(
         onDismissRequest = { if (!isSubmitting) onDismiss() },
         title = {
             Text(
-                text = "Buat Trip Bersama",
+                text = "Buat Grup",
                 style = MaterialTheme.typography.titleLarge
             )
         },
@@ -98,8 +98,8 @@ fun CreateSharedTripDialog(
                         title = it.take(80)
                         if (it.isNotBlank()) showError = false
                     },
-                    label = { Text("Nama Trip Bersama") },
-                    placeholder = { Text("Contoh: Liburan Yogyakarta 2026") },
+                    label = { Text("Nama Grup") },
+                    placeholder = { Text("Contoh: Bali 2026") },
                     singleLine = true,
                     isError = showError,
                     supportingText = if (showError) {
@@ -147,7 +147,7 @@ fun CreateSharedTripDialog(
                 if (isSubmitting) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                 } else {
-                    Text("Buat Trip")
+                    Text("Buat Grup")
                 }
             }
         },
@@ -174,7 +174,7 @@ fun JoinTripByCodeDialog(
         onDismissRequest = { if (!isSubmitting) onDismiss() },
         title = {
             Text(
-                text = "Gabung Trip Bersama",
+                text = "Gabung dengan Kode",
                 style = MaterialTheme.typography.titleLarge
             )
         },
@@ -441,7 +441,7 @@ fun AccountProfileSheet(
                         .height(48.dp),
                     shape = RoundedCornerShape(14.dp)
                 ) {
-                    Text("Buat Trip Bersama")
+                    Text("Buat Grup")
                 }
                 OutlinedButton(
                     onClick = {
@@ -453,7 +453,7 @@ fun AccountProfileSheet(
                         .height(48.dp),
                     shape = RoundedCornerShape(14.dp)
                 ) {
-                    Text("Gabung Kode")
+                    Text("Gabung dengan Kode")
                 }
             }
 

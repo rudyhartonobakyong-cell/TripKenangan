@@ -95,11 +95,13 @@ fun HomeScreen(
                         verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
                         Text(
-                            text = uiState.activeSharedTrip?.let { "Trip Bersama: ${it.title}" }
-                                ?: "Selamat Menjelajah",
+                            text = uiState.activeSharedTrip?.let {
+                                val count = maxOf(uiState.activeTripMembers.size, it.memberUids.size)
+                                "Grup: ${it.title} - $count anggota"
+                            } ?: "Pribadi - hanya di HP ini",
                             style = MaterialTheme.typography.bodyMedium,
                             color = if (uiState.activeSharedTrip != null) {
-                                MaterialTheme.colorScheme.primary
+                                MaterialTheme.colorScheme.tertiary
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant
                             },

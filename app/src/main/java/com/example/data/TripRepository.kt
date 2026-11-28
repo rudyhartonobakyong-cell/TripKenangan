@@ -149,4 +149,26 @@ class TripRepository(
             PhotoStorageHelper.deleteFileQuietly(foto.filePath)
         }
     }
+
+    suspend fun getKunjunganIdsForSharedTrip(remoteTripId: String): List<String> {
+        val tripUuid = Trip.sharedTripUuid(remoteTripId)
+        return kunjunganDao.getKunjunganForTripOnce(tripUuid).map { it.id }
+    }
+
+    suspend fun cleanupRemovedSharedTripCache(remoteTripId: String) {
+        val tripUuid = Trip.sharedTripUuid(remoteTripId)
+        val visits = kunjunganDao.getKunjunganForTripOnce(tripUuid)
+        var remainingWithPhotos = 0
+        visits.forEach { kunjungan ->
+            val fotos = fotoDao.getFotosForKunjunganOnce(kunjungan.id)
+            if (fotos.isEmpty()) {
+                kunjunganDao.deleteKunjunganById(kunjungan.id)
+            } else {
+                remainingWithPhotos++
+            }
+        }
+        if (remainingWithPhotos == 0) {
+            tripDao.deleteTripById(tripUuid)
+        }
+    }
 }

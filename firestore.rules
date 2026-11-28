@@ -106,24 +106,46 @@ service cloud.firestore {
       allow update: if isSignedIn() &&
                        isValidId(tripId) &&
                        isValidSharedTrip(incoming()) &&
-                       incoming().ownerId == existing().ownerId &&
                        incoming().inviteCode == existing().inviteCode &&
                        incoming().createdAt == existing().createdAt && (
                          // Aksi 1: Pemilik mengubah judul trip
                          (
                            request.auth.uid == existing().ownerId &&
+                           incoming().ownerId == existing().ownerId &&
                            incoming().memberUids == existing().memberUids &&
                            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'updatedAt'])
                          ) ||
                          // Aksi 2: Pengguna baru bergabung memakai kode undangan yang sah
                          (
                            !(request.auth.uid in existing().memberUids) &&
+                           incoming().ownerId == existing().ownerId &&
                            incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']) &&
                            incoming().memberUids.hasAll(existing().memberUids) &&
                            incoming().memberUids.size() == existing().memberUids.size() + 1 &&
                            request.auth.uid in incoming().memberUids &&
                            existsAfter(/databases/$(database)/documents/trips/$(tripId)/members/$(request.auth.uid)) &&
                            getAfter(/databases/$(database)/documents/trips/$(tripId)/members/$(request.auth.uid)).data.inviteCodeUsed == existing().inviteCode
+                         ) ||
+                         // Aksi 3: Anggota biasa keluar dari grup (pemilik tidak boleh keluar langsung)
+                         (
+                           request.auth.uid in existing().memberUids &&
+                           request.auth.uid != existing().ownerId &&
+                           incoming().ownerId == existing().ownerId &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']) &&
+                           !(request.auth.uid in incoming().memberUids) &&
+                           existing().memberUids.hasAll(incoming().memberUids) &&
+                           existing().memberUids.size() == incoming().memberUids.size() + 1 &&
+                           !existsAfter(/databases/$(database)/documents/trips/$(tripId)/members/$(request.auth.uid))
+                         ) ||
+                         // Aksi 4: Pemilik menyerahkan peran admin ke anggota lain
+                         (
+                           request.auth.uid == existing().ownerId &&
+                           incoming().ownerId != existing().ownerId &&
+                           incoming().ownerId in existing().memberUids &&
+                           incoming().memberUids == existing().memberUids &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['ownerId', 'updatedAt']) &&
+                           getAfter(/databases/$(database)/documents/trips/$(tripId)/members/$(incoming().ownerId)).data.role == 'owner' &&
+                           getAfter(/databases/$(database)/documents/trips/$(tripId)/members/$(request.auth.uid)).data.role == 'member'
                          )
                        );
 
@@ -163,16 +185,39 @@ service cloud.firestore {
         allow update: if isSignedIn() &&
                          isValidId(tripId) &&
                          isValidId(memberId) &&
-                         memberId == request.auth.uid &&
                          isTripMember(tripId) &&
                          isValidTripMember(incoming()) &&
                          incoming().uid == existing().uid &&
-                         incoming().role == existing().role &&
                          incoming().inviteCodeUsed == existing().inviteCodeUsed &&
-                         incoming().joinedAt == existing().joinedAt &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl']);
+                         incoming().joinedAt == existing().joinedAt && (
+                           (
+                             memberId == request.auth.uid &&
+                             incoming().role == existing().role &&
+                             incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl'])
+                           ) ||
+                           (
+                             get(/databases/$(database)/documents/trips/$(tripId)).data.ownerId == request.auth.uid &&
+                             incoming().displayName == existing().displayName &&
+                             incoming().photoUrl == existing().photoUrl &&
+                             incoming().diff(existing()).affectedKeys().hasOnly(['role']) &&
+                             (
+                               (memberId == request.auth.uid && incoming().role == 'member') ||
+                               (memberId == getAfter(/databases/$(database)/documents/trips/$(tripId)).data.ownerId && incoming().role == 'owner')
+                             )
+                           )
+                         );
 
-        allow delete: if false;
+        allow delete: if isSignedIn() &&
+                         isValidId(tripId) &&
+                         isValidId(memberId) &&
+                         exists(/databases/$(database)/documents/trips/$(tripId)) && (
+                           (
+                             memberId == request.auth.uid &&
+                             get(/databases/$(database)/documents/trips/$(tripId)).data.ownerId != request.auth.uid &&
+                             request.auth.uid in get(/databases/$(database)/documents/trips/$(tripId)).data.memberUids
+                           ) ||
+                           get(/databases/$(database)/documents/trips/$(tripId)).data.ownerId == request.auth.uid
+                         );
       }
 
       // 3. Lokasi Kunjungan Trip Bersama
@@ -228,8 +273,10 @@ service cloud.firestore {
         allow delete: if isSignedIn() &&
                          isValidId(tripId) &&
                          isValidId(commentId) &&
-                         isTripMember(tripId) &&
-                         existing().authorUid == request.auth.uid;
+                         isTripMember(tripId) && (
+                           existing().authorUid == request.auth.uid ||
+                           get(/databases/$(database)/documents/trips/$(tripId)).data.ownerId == request.auth.uid
+                         );
       }
     }
 
@@ -248,7 +295,16 @@ service cloud.firestore {
                        getAfter(/databases/$(database)/documents/trips/$(incoming().tripId)).data.ownerId == request.auth.uid &&
                        getAfter(/databases/$(database)/documents/trips/$(incoming().tripId)).data.inviteCode == inviteCode;
 
-      allow update: if false;
+      allow update: if isSignedIn() &&
+                       isValidInviteCode(inviteCode) &&
+                       existing().ownerId == request.auth.uid &&
+                       isValidTripInvite(incoming()) &&
+                       incoming().tripId == existing().tripId &&
+                       incoming().tripTitle == existing().tripTitle &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['ownerId']) &&
+                       existsAfter(/databases/$(database)/documents/trips/$(existing().tripId)) &&
+                       getAfter(/databases/$(database)/documents/trips/$(existing().tripId)).data.ownerId == incoming().ownerId;
       allow delete: if isSignedIn() && isValidInviteCode(inviteCode) && existing().ownerId == request.auth.uid;
     }
 

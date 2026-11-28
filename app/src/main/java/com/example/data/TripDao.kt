@@ -18,4 +18,7 @@ interface TripDao {
 
     @Upsert
     suspend fun upsertTrips(trips: List<Trip>)
+
+    @Query("DELETE FROM trips WHERE id = :id")
+    suspend fun deleteTripById(id: String)
 }

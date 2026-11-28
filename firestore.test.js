@@ -229,12 +229,98 @@ test("Trip members can create, update, list visits and write/read date comments;
   );
   await assertSucceeds(aliceDb.collection("trips").doc("trip_bali").collection("comments").get());
 
-  // Alice cannot delete Bob's comment
+  // Owner (Alice) can delete comment, while another non-owner member (Charlie) cannot delete Bob's comment
+  const charlieDb = testEnv.authenticatedContext(CHARLIE_UID).firestore();
+  const charlieJoin = charlieDb.batch();
+  charlieJoin.set(charlieDb.collection("trips").doc("trip_bali").collection("members").doc(CHARLIE_UID), {
+    uid: CHARLIE_UID,
+    displayName: "Charlie",
+    photoUrl: "",
+    role: "member",
+    inviteCodeUsed: "BALI26",
+    joinedAt: now,
+  });
+  charlieJoin.update(charlieDb.collection("trips").doc("trip_bali"), {
+    memberUids: [ALICE_UID, BOB_UID, CHARLIE_UID],
+    updatedAt: now,
+  });
+  await assertSucceeds(charlieJoin.commit());
+
   await assertFails(
-    aliceDb.collection("trips").doc("trip_bali").collection("comments").doc("c_1").delete()
+    charlieDb.collection("trips").doc("trip_bali").collection("comments").doc("c_1").delete()
   );
   // Bob can delete his own comment
   await assertSucceeds(
     bobDb.collection("trips").doc("trip_bali").collection("comments").doc("c_1").delete()
   );
+});
+
+test("Member can leave group; owner cannot leave until transferring admin or deleting entire group", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  await assertSucceeds(createTripBatch(aliceDb, ALICE_UID, "Alice", "trip_bali", "Liburan Bali", "BALI26"));
+
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const now = new Date(Date.now() - 500);
+  const joinBatch = bobDb.batch();
+  joinBatch.set(bobDb.collection("trips").doc("trip_bali").collection("members").doc(BOB_UID), {
+    uid: BOB_UID,
+    displayName: "Bob",
+    photoUrl: "",
+    role: "member",
+    inviteCodeUsed: "BALI26",
+    joinedAt: now,
+  });
+  joinBatch.update(bobDb.collection("trips").doc("trip_bali"), {
+    memberUids: [ALICE_UID, BOB_UID],
+    updatedAt: now,
+  });
+  await assertSucceeds(joinBatch.commit());
+
+  // Owner cannot leave directly
+  const ownerLeave = aliceDb.batch();
+  ownerLeave.delete(aliceDb.collection("trips").doc("trip_bali").collection("members").doc(ALICE_UID));
+  ownerLeave.update(aliceDb.collection("trips").doc("trip_bali"), {
+    memberUids: [BOB_UID],
+    updatedAt: new Date(Date.now() - 200),
+  });
+  await assertFails(ownerLeave.commit());
+
+  // Member Bob cannot delete the group
+  await assertFails(bobDb.collection("trips").doc("trip_bali").delete());
+
+  // Alice transfers admin to Bob
+  const transferBatch = aliceDb.batch();
+  transferBatch.update(aliceDb.collection("trips").doc("trip_bali"), {
+    ownerId: BOB_UID,
+    updatedAt: new Date(Date.now() - 100),
+  });
+  transferBatch.update(aliceDb.collection("trips").doc("trip_bali").collection("members").doc(BOB_UID), {
+    role: "owner",
+  });
+  transferBatch.update(aliceDb.collection("trips").doc("trip_bali").collection("members").doc(ALICE_UID), {
+    role: "member",
+  });
+  transferBatch.update(aliceDb.collection("trip_invites").doc("BALI26"), {
+    ownerId: BOB_UID,
+  });
+  await assertSucceeds(transferBatch.commit());
+
+  // Now former owner Alice is a regular member and can leave
+  const aliceLeave = aliceDb.batch();
+  aliceLeave.delete(aliceDb.collection("trips").doc("trip_bali").collection("members").doc(ALICE_UID));
+  aliceLeave.update(aliceDb.collection("trips").doc("trip_bali"), {
+    memberUids: [BOB_UID],
+    updatedAt: new Date(Date.now() - 50),
+  });
+  await assertSucceeds(aliceLeave.commit());
+
+  // New owner Bob can delete subcollections, invite doc, and trip document
+  const bobDeleteSub = bobDb.batch();
+  bobDeleteSub.delete(bobDb.collection("trips").doc("trip_bali").collection("members").doc(BOB_UID));
+  await assertSucceeds(bobDeleteSub.commit());
+
+  const bobDeleteTrip = bobDb.batch();
+  bobDeleteTrip.delete(bobDb.collection("trip_invites").doc("BALI26"));
+  bobDeleteTrip.delete(bobDb.collection("trips").doc("trip_bali"));
+  await assertSucceeds(bobDeleteTrip.commit());
 });

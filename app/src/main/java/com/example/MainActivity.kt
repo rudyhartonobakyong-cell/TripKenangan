@@ -72,6 +72,7 @@ import com.example.data.TripRepository
 import com.example.notifications.TripAlarmScheduler
 import com.example.notifications.TripNotificationHelper
 import com.example.ui.DisplayVisit
+import com.example.ui.SpaceMode
 import com.example.ui.TripBuddyViewModel
 import com.example.ui.TripTab
 import com.example.ui.components.AccountProfileSheet
@@ -84,6 +85,7 @@ import com.example.ui.components.JoinTripByCodeDialog
 import com.example.ui.components.MapsSearchSheet
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.CalendarScreen
+import com.example.ui.screens.GroupDirectoryScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.MemoriesScreen
 import com.example.ui.screens.TripMembersScreen
@@ -366,12 +368,17 @@ fun TripBuddyApp(
     }
 
     if (uiState.showMembersScreen && uiState.activeSharedTrip != null) {
+        val activeGroup = uiState.activeSharedTrip!!
         TripMembersScreen(
-            trip = uiState.activeSharedTrip!!,
+            trip = activeGroup,
             members = uiState.activeTripMembers,
             currentUserId = uiState.currentUserId,
+            isSubmitting = uiState.isSubmittingCollab,
             onBack = viewModel::closeMembersScreen,
-            onInviteClick = { viewModel.openInviteSheet() }
+            onInviteClick = { viewModel.openInviteSheet(activeGroup) },
+            onTransferAdmin = { newAdmin -> viewModel.transferGroupAdmin(activeGroup, newAdmin) },
+            onLeaveGroup = { viewModel.leaveSharedTrip(activeGroup) },
+            onDeleteGroup = { viewModel.deleteSharedTrip(activeGroup) }
         )
     } else if (uiState.activeVisitMemoryDetail != null) {
         VisitMemoryDetailScreen(
@@ -385,6 +392,7 @@ fun TripBuddyApp(
     } else {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val useNavRail = maxWidth >= 600.dp
+            val isInGroupDirectory = uiState.spaceMode == SpaceMode.GRUP && uiState.showGroupDirectory
 
             Scaffold(
                 modifier = Modifier.fillMaxSize(),
@@ -392,7 +400,9 @@ fun TripBuddyApp(
                 contentWindowInsets = WindowInsets.safeDrawing,
                 snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
                 floatingActionButton = {
-                    if (uiState.selectedTab == TripTab.BERANDA || uiState.selectedTab == TripTab.KENANGAN) {
+                    if (!isInGroupDirectory &&
+                        (uiState.selectedTab == TripTab.BERANDA || uiState.selectedTab == TripTab.KENANGAN)
+                    ) {
                         ExtendedFloatingActionButton(
                             onClick = viewModel::openCameraVisitPicker,
                             containerColor = MaterialTheme.colorScheme.primary,
@@ -487,15 +497,15 @@ fun TripBuddyApp(
                             .fillMaxSize()
                     ) {
                         CollabWorkspaceBar(
-                            activeWorkspace = uiState.activeWorkspace,
-                            sharedTrips = uiState.sharedTrips,
+                            spaceMode = uiState.spaceMode,
+                            showGroupDirectory = uiState.showGroupDirectory,
+                            activeSpaceTitle = uiState.activeSpaceTitle,
                             activeSharedTrip = uiState.activeSharedTrip,
                             activeTripMembers = uiState.activeTripMembers,
                             userName = uiState.currentUserName,
                             userPhotoUrl = uiState.currentUserPhotoUrl,
-                            onSelectWorkspace = viewModel::selectWorkspace,
-                            onCreateTripClick = viewModel::openCreateTripDialog,
-                            onJoinTripClick = { viewModel.openJoinTripDialog() },
+                            onSelectSpaceMode = viewModel::selectSpaceMode,
+                            onOpenGroupDirectory = viewModel::openGroupDirectory,
                             onOpenMembersClick = viewModel::openMembersScreen,
                             onInviteClick = { viewModel.openInviteSheet() },
                             onAccountClick = viewModel::openAccountSheet
@@ -506,71 +516,85 @@ fun TripBuddyApp(
                                 .weight(1f)
                                 .fillMaxSize()
                         ) {
-                            Crossfade(
-                                targetState = uiState.selectedTab,
-                                label = "TripTabTransition"
-                            ) { currentTab ->
-                                when (currentTab) {
-                                    TripTab.BERANDA -> HomeScreen(
-                                        uiState = uiState,
-                                        onOpenCalendar = { viewModel.selectTab(TripTab.KALENDER) },
-                                        onOpenMemories = { viewModel.selectTab(TripTab.KENANGAN) },
-                                        onOpenAddToday = {
-                                            viewModel.selectTab(TripTab.KALENDER)
-                                            viewModel.openAddLocationSheet(uiState.todayEpochDay)
-                                        },
-                                        onOpenMapsForVisit = { visit -> viewModel.openMapsSearchSheet(visit) },
-                                        onToggleComplete = { visit ->
-                                            viewModel.toggleManualCompleted(visit)
-                                            showMessage("\"${visit.locationName}\" dipindahkan ke Kenangan")
-                                        },
-                                        onTakePhotoForVisit = requestCameraForVisit,
-                                        onTestNotificationClick = {
-                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                                !TripNotificationHelper.hasNotificationPermission(context)
-                                            ) {
-                                                pendingTestAfterPermission = true
-                                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                            } else {
-                                                scheduleTestAndNotifyUser()
+                            if (isInGroupDirectory) {
+                                GroupDirectoryScreen(
+                                    sharedTrips = uiState.sharedTrips,
+                                    activeWorkspace = uiState.activeWorkspace,
+                                    currentUserId = uiState.currentUserId,
+                                    onCreateGroupClick = viewModel::openCreateTripDialog,
+                                    onJoinByCodeClick = { viewModel.openJoinTripDialog() },
+                                    onOpenGroupTrip = { trip -> viewModel.selectGroupTrip(trip, openMembersPage = false) },
+                                    onOpenGroupPage = { trip -> viewModel.selectGroupTrip(trip, openMembersPage = true) },
+                                    onInviteGroup = { trip -> viewModel.openInviteSheet(trip) }
+                                )
+                            } else {
+                                Crossfade(
+                                    targetState = uiState.selectedTab,
+                                    label = "TripTabTransition"
+                                ) { currentTab ->
+                                    when (currentTab) {
+                                        TripTab.BERANDA -> HomeScreen(
+                                            uiState = uiState,
+                                            onOpenCalendar = { viewModel.selectTab(TripTab.KALENDER) },
+                                            onOpenMemories = { viewModel.selectTab(TripTab.KENANGAN) },
+                                            onOpenAddToday = {
+                                                viewModel.selectTab(TripTab.KALENDER)
+                                                viewModel.openAddLocationSheet(uiState.todayEpochDay)
+                                            },
+                                            onOpenMapsForVisit = { visit -> viewModel.openMapsSearchSheet(visit) },
+                                            onToggleComplete = { visit ->
+                                                viewModel.toggleManualCompleted(visit)
+                                                showMessage("\"${visit.locationName}\" dipindahkan ke Kenangan")
+                                            },
+                                            onTakePhotoForVisit = requestCameraForVisit,
+                                            onTestNotificationClick = {
+                                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                                    !TripNotificationHelper.hasNotificationPermission(context)
+                                                ) {
+                                                    pendingTestAfterPermission = true
+                                                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                                } else {
+                                                    scheduleTestAndNotifyUser()
+                                                }
                                             }
-                                        }
-                                    )
+                                        )
 
-                                    TripTab.KALENDER -> CalendarScreen(
-                                        uiState = uiState,
-                                        onBackToHome = { viewModel.selectTab(TripTab.BERANDA) },
-                                        onPreviousMonth = viewModel::goToPreviousMonth,
-                                        onNextMonth = viewModel::goToNextMonth,
-                                        onJumpToToday = viewModel::jumpToToday,
-                                        onDateClick = viewModel::onCalendarDateClicked,
-                                        onAddLocationForSelectedDate = {
-                                            viewModel.openAddLocationSheet(uiState.selectedDateEpochDay)
-                                        },
-                                        onOpenMapsForVisit = { visit -> viewModel.openMapsSearchSheet(visit) },
-                                        onToggleComplete = { visit ->
-                                            viewModel.toggleManualCompleted(visit)
-                                            val msg = if (!visit.completedManually) {
-                                                "\"${visit.locationName}\" ditandai selesai"
-                                            } else {
-                                                "\"${visit.locationName}\" dikembalikan ke rencana"
-                                            }
-                                            showMessage(msg)
-                                        },
-                                        onTakePhotoForVisit = requestCameraForVisit,
-                                        onEditVisit = { visit -> viewModel.openEditLocationSheet(visit) },
-                                        onDeleteVisit = { visit -> viewModel.deleteVisit(visit) },
-                                        onSendComment = viewModel::sendDateComment,
-                                        onDeleteComment = viewModel::deleteDateComment
-                                    )
+                                        TripTab.KALENDER -> CalendarScreen(
+                                            uiState = uiState,
+                                            onBackToHome = { viewModel.selectTab(TripTab.BERANDA) },
+                                            onPreviousMonth = viewModel::goToPreviousMonth,
+                                            onNextMonth = viewModel::goToNextMonth,
+                                            onJumpToToday = viewModel::jumpToToday,
+                                            onDateClick = viewModel::onCalendarDateClicked,
+                                            onAddLocationForSelectedDate = {
+                                                viewModel.openAddLocationSheet(uiState.selectedDateEpochDay)
+                                            },
+                                            onOpenMapsForVisit = { visit -> viewModel.openMapsSearchSheet(visit) },
+                                            onToggleComplete = { visit ->
+                                                viewModel.toggleManualCompleted(visit)
+                                                val msg = if (!visit.completedManually) {
+                                                    "\"${visit.locationName}\" ditandai selesai"
+                                                } else {
+                                                    "\"${visit.locationName}\" dikembalikan ke rencana"
+                                                }
+                                                showMessage(msg)
+                                            },
+                                            onTakePhotoForVisit = requestCameraForVisit,
+                                            onEditVisit = { visit -> viewModel.openEditLocationSheet(visit) },
+                                            onDeleteVisit = { visit -> viewModel.deleteVisit(visit) },
+                                            onSendComment = viewModel::sendDateComment,
+                                            onDeleteComment = viewModel::deleteDateComment
+                                        )
 
-                                    TripTab.KENANGAN -> MemoriesScreen(
-                                        uiState = uiState,
-                                        onBackToHome = { viewModel.selectTab(TripTab.BERANDA) },
-                                        onSearchQueryChange = viewModel::setMemorySearchQuery,
-                                        onTripFilterChange = viewModel::setMemoryTripFilter,
-                                        onVisitMemoryClick = viewModel::openVisitMemoryDetail
-                                    )
+                                        TripTab.KENANGAN -> MemoriesScreen(
+                                            uiState = uiState,
+                                            onBackToHome = { viewModel.selectTab(TripTab.BERANDA) },
+                                            onSearchQueryChange = viewModel::setMemorySearchQuery,
+                                            onMemoriesTabChange = viewModel::selectMemoriesTab,
+                                            onSelectMemoryGroup = viewModel::selectMemoryGroup,
+                                            onVisitMemoryClick = viewModel::openVisitMemoryDetail
+                                        )
+                                    }
                                 }
                             }
                         }
