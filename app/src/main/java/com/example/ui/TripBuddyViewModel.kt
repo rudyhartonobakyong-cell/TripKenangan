@@ -1,6 +1,7 @@
 package com.example.ui
 
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -17,12 +18,24 @@ import com.example.data.Kunjungan
 import com.example.data.Trip
 import com.example.data.TripRepository
 import com.example.notifications.AlarmScheduleResult
+import com.example.notifications.ReminderPreferences
 import com.example.notifications.ReminderTimingOption
 import com.example.notifications.TripAlarmScheduler
 import com.example.notifications.UserReminderSettings
+import com.example.ui.theme.AppThemeOption
+import com.example.ui.theme.ThemePreferences
+import com.example.util.BackupEstimate
+import com.example.util.BackupExportResult
+import com.example.util.BackupInspectionSummary
+import com.example.util.BackupManager
+import com.example.util.BackupProgress
 import com.example.util.DateUtils
 import com.example.util.ExportedPdfResult
+import com.example.util.PdfExportOptions
+import com.example.util.PdfExportProgress
+import com.example.util.PdfExportScope
 import com.example.util.PdfExporter
+import com.example.util.PdfPhotoAlbumSpec
 import com.example.util.PhotoStorageHelper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -146,8 +159,19 @@ private data class NavAndModalState(
     val firestoreTestResult: FirestoreConnectionTestResult? = null,
     val collabErrorMessage: String? = null,
     val isExportingPdf: Boolean = false,
+    val pdfExportOptions: PdfExportOptions? = null,
+    val pdfAllowThisVisitScope: Boolean = false,
+    val pdfExportProgress: PdfExportProgress? = null,
     val exportedPdfResult: ExportedPdfResult? = null,
-    val reminderSettings: UserReminderSettings = UserReminderSettings()
+    val reminderSettings: UserReminderSettings = UserReminderSettings(),
+    val backupIncludeVideos: Boolean = true,
+    val backupEstimate: BackupEstimate? = null,
+    val isEstimatingBackup: Boolean = false,
+    val backupProgress: BackupProgress? = null,
+    val pendingBackupImportSummary: BackupInspectionSummary? = null,
+    val backupStatusDialogTitle: String? = null,
+    val backupStatusDialogMessage: String? = null,
+    val backupStatusIsError: Boolean = false
 )
 
 data class TripBuddyUiState(
@@ -207,8 +231,20 @@ data class TripBuddyUiState(
     val firestoreTestResult: FirestoreConnectionTestResult? = null,
     val collabErrorMessage: String? = null,
     val isExportingPdf: Boolean = false,
+    val pdfExportOptions: PdfExportOptions? = null,
+    val pdfAllowThisVisitScope: Boolean = false,
+    val pdfExportPreviewSpec: PdfPhotoAlbumSpec? = null,
+    val pdfExportProgress: PdfExportProgress? = null,
     val exportedPdfResult: ExportedPdfResult? = null,
-    val reminderSettings: UserReminderSettings = UserReminderSettings()
+    val reminderSettings: UserReminderSettings = UserReminderSettings(),
+    val backupIncludeVideos: Boolean = true,
+    val backupEstimate: BackupEstimate? = null,
+    val isEstimatingBackup: Boolean = false,
+    val backupProgress: BackupProgress? = null,
+    val pendingBackupImportSummary: BackupInspectionSummary? = null,
+    val backupStatusDialogTitle: String? = null,
+    val backupStatusDialogMessage: String? = null,
+    val backupStatusIsError: Boolean = false
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -226,6 +262,12 @@ class TripBuddyViewModel(
 
     private val _snackbarEvents = Channel<String>(Channel.BUFFERED)
     val snackbarEvents = _snackbarEvents.receiveAsFlow()
+
+    private val _shareBackupEvents = Channel<BackupExportResult>(Channel.BUFFERED)
+    val shareBackupEvents = _shareBackupEvents.receiveAsFlow()
+
+    private val _themeRestoredEvents = Channel<AppThemeOption>(Channel.BUFFERED)
+    val themeRestoredEvents = _themeRestoredEvents.receiveAsFlow()
 
     private val tickerMillis = flow {
         while (true) {
@@ -547,6 +589,16 @@ class TripBuddyViewModel(
             totalGroups = sharedTrips.size
         )
 
+        val pdfPreviewSpec = nav.pdfExportOptions?.let { options ->
+            PdfExporter.buildPhotoAlbumSpec(
+                options = options,
+                allTrips = room.allTrips,
+                allKunjungan = room.allKunjungan,
+                allFotos = room.allFotos,
+                resolveTakenTimeMillis = { it.createdAtMillis }
+            )
+        }
+
         TripBuddyUiState(
             currentUserId = currentUserId,
             currentUserName = currentUserName,
@@ -604,8 +656,20 @@ class TripBuddyViewModel(
             firestoreTestResult = nav.firestoreTestResult,
             collabErrorMessage = nav.collabErrorMessage,
             isExportingPdf = nav.isExportingPdf,
+            pdfExportOptions = nav.pdfExportOptions,
+            pdfAllowThisVisitScope = nav.pdfAllowThisVisitScope,
+            pdfExportPreviewSpec = pdfPreviewSpec,
+            pdfExportProgress = nav.pdfExportProgress,
             exportedPdfResult = nav.exportedPdfResult,
-            reminderSettings = nav.reminderSettings
+            reminderSettings = nav.reminderSettings,
+            backupIncludeVideos = nav.backupIncludeVideos,
+            backupEstimate = nav.backupEstimate,
+            isEstimatingBackup = nav.isEstimatingBackup,
+            backupProgress = nav.backupProgress,
+            pendingBackupImportSummary = nav.pendingBackupImportSummary,
+            backupStatusDialogTitle = nav.backupStatusDialogTitle,
+            backupStatusDialogMessage = nav.backupStatusDialogMessage,
+            backupStatusIsError = nav.backupStatusIsError
         )
     }.stateIn(
         scope = viewModelScope,
@@ -951,6 +1015,275 @@ class TripBuddyViewModel(
         }
     }
 
+    fun setBackupIncludeVideos(context: Context, includeVideos: Boolean) {
+        navAndModalState.update { it.copy(backupIncludeVideos = includeVideos) }
+        refreshBackupEstimate(context, includeVideos)
+    }
+
+    fun refreshBackupEstimate(
+        context: Context,
+        includeVideos: Boolean = navAndModalState.value.backupIncludeVideos
+    ) {
+        val appContext = context.applicationContext
+        navAndModalState.update { it.copy(isEstimatingBackup = true) }
+        viewModelScope.launch {
+            val estimate = withContext(Dispatchers.IO) {
+                localRepository.ensurePersonalTripExists()
+                val personalVisits = localRepository.getAllKunjunganOnce()
+                    .filter { it.tripId == Trip.PERSONAL_TRIP_ID }
+                val personalVisitIds = personalVisits.map { it.id }.toSet()
+                val personalFotos = localRepository.getAllFotosOnce()
+                    .filter { it.tripId == Trip.PERSONAL_TRIP_ID || it.kunjunganId in personalVisitIds }
+                BackupManager.computeBackupEstimate(
+                    filesDir = appContext.filesDir,
+                    personalKunjungan = personalVisits,
+                    personalFotos = personalFotos,
+                    includeVideos = includeVideos
+                )
+            }
+            navAndModalState.update {
+                it.copy(
+                    isEstimatingBackup = false,
+                    backupEstimate = estimate
+                )
+            }
+        }
+    }
+
+    fun exportPersonalBackup(context: Context) {
+        if (navAndModalState.value.backupProgress != null) return
+        val appContext = context.applicationContext
+        val includeVideos = navAndModalState.value.backupIncludeVideos
+
+        navAndModalState.update {
+            it.copy(
+                backupProgress = BackupProgress(
+                    isImport = false,
+                    stepLabel = "Menyiapkan cadangan data pribadi...",
+                    processedItems = 0,
+                    totalItems = 1,
+                    processedBytes = 0L,
+                    totalBytes = 0L
+                )
+            )
+        }
+
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                localRepository.ensurePersonalTripExists()
+                val personalTrip = localRepository.getAllTripsOnce()
+                    .firstOrNull { it.id == Trip.PERSONAL_TRIP_ID }
+                    ?: Trip.personalTrip()
+                val personalVisits = localRepository.getAllKunjunganOnce()
+                    .filter { it.tripId == Trip.PERSONAL_TRIP_ID }
+                val personalVisitIds = personalVisits.map { it.id }.toSet()
+                val personalFotos = localRepository.getAllFotosOnce()
+                    .filter { it.tripId == Trip.PERSONAL_TRIP_ID || it.kunjunganId in personalVisitIds }
+
+                BackupManager.exportPersonalBackup(
+                    context = appContext,
+                    personalTrip = personalTrip,
+                    personalKunjungan = personalVisits,
+                    personalFotos = personalFotos,
+                    userId = currentUserId,
+                    includeVideos = includeVideos,
+                    onProgress = { progress ->
+                        navAndModalState.update { state ->
+                            state.copy(backupProgress = progress)
+                        }
+                    }
+                )
+            }
+
+            result.onSuccess { exported ->
+                navAndModalState.update {
+                    it.copy(backupProgress = null)
+                }
+                _shareBackupEvents.trySend(exported)
+            }.onFailure { err ->
+                navAndModalState.update {
+                    it.copy(
+                        backupProgress = null,
+                        backupStatusDialogTitle = "Gagal Membuat Cadangan",
+                        backupStatusDialogMessage = err.localizedMessage
+                            ?: "Terjadi kesalahan saat membuat file cadangan ZIP.",
+                        backupStatusIsError = true
+                    )
+                }
+            }
+        }
+    }
+
+    fun inspectBackupZipForImport(context: Context, uri: Uri) {
+        if (navAndModalState.value.backupProgress != null) return
+        val appContext = context.applicationContext
+
+        navAndModalState.update {
+            it.copy(
+                backupProgress = BackupProgress(
+                    isImport = true,
+                    stepLabel = "Memvalidasi file cadangan & manifest...",
+                    processedItems = 0,
+                    totalItems = 1,
+                    processedBytes = 0L,
+                    totalBytes = 0L
+                )
+            )
+        }
+
+        viewModelScope.launch {
+            val inspectionResult = withContext(Dispatchers.IO) {
+                val existingKunjunganIds = localRepository.getAllKunjunganOnce().map { it.id }.toSet()
+                val existingFotoIds = localRepository.getAllFotosOnce().map { it.id }.toSet()
+                BackupManager.inspectBackupZip(
+                    context = appContext,
+                    uri = uri,
+                    existingKunjunganIds = existingKunjunganIds,
+                    existingFotoIds = existingFotoIds
+                )
+            }
+
+            inspectionResult.onSuccess { summary ->
+                navAndModalState.update {
+                    it.copy(
+                        backupProgress = null,
+                        pendingBackupImportSummary = summary
+                    )
+                }
+            }.onFailure { err ->
+                navAndModalState.update {
+                    it.copy(
+                        backupProgress = null,
+                        pendingBackupImportSummary = null,
+                        backupStatusDialogTitle = "File Cadangan Tidak Valid",
+                        backupStatusDialogMessage = err.localizedMessage
+                            ?: "File cadangan rusak atau tidak dapat dibaca.",
+                        backupStatusIsError = true
+                    )
+                }
+            }
+        }
+    }
+
+    fun dismissBackupImportConfirm() {
+        navAndModalState.update { it.copy(pendingBackupImportSummary = null) }
+    }
+
+    fun confirmBackupRestore(context: Context) {
+        val summary = navAndModalState.value.pendingBackupImportSummary ?: return
+        if (navAndModalState.value.backupProgress != null) return
+        val appContext = context.applicationContext
+
+        navAndModalState.update {
+            it.copy(
+                pendingBackupImportSummary = null,
+                backupProgress = BackupProgress(
+                    isImport = true,
+                    stepLabel = "Memulai pemulihan data...",
+                    processedItems = 0,
+                    totalItems = (summary.manifest.mediaFileCount + 2).coerceAtLeast(2),
+                    processedBytes = 0L,
+                    totalBytes = summary.estimatedRestoreBytes
+                )
+            )
+        }
+
+        viewModelScope.launch {
+            val restoreResult = withContext(Dispatchers.IO) {
+                runCatching {
+                    val existingKunjunganIds = localRepository.getAllKunjunganOnce().map { it.id }.toSet()
+                    val existingFotoIds = localRepository.getAllFotosOnce().map { it.id }.toSet()
+
+                    val parsed = BackupManager.extractBackupZipFromStream(
+                        streamProvider = { appContext.contentResolver.openInputStream(summary.sourceUri) },
+                        filesDir = appContext.filesDir,
+                        existingKunjunganIds = existingKunjunganIds,
+                        existingFotoIds = existingFotoIds,
+                        expectedTotalBytes = summary.estimatedRestoreBytes,
+                        expectedTotalMediaFiles = summary.manifest.mediaFileCount,
+                        onProgress = { progress ->
+                            navAndModalState.update { state ->
+                                state.copy(backupProgress = progress)
+                            }
+                        }
+                    )
+
+                    localRepository.restorePersonalBackupData(
+                        newKunjungan = parsed.newKunjungan,
+                        newFotos = parsed.newFotos
+                    )
+
+                    // Pre-warm thumbnails for newly restored videos so Kenangan displays them right away
+                    parsed.newFotos.filter { it.isVideo }.forEach { video ->
+                        PhotoStorageHelper.generateAndCacheVideoThumbnail(
+                            context = appContext,
+                            videoPath = video.filePath,
+                            mediaUuid = video.id
+                        )
+                    }
+
+                    val restoredTheme = AppThemeOption.fromId(parsed.restoredSettings.themeId)
+                    ThemePreferences.saveTheme(appContext, restoredTheme)
+
+                    val restoredTimings = ReminderTimingOption.fromIds(
+                        parsed.restoredSettings.selectedTimingIds.toSet()
+                    )
+                    val restoredReminder = UserReminderSettings(
+                        enabled = parsed.restoredSettings.remindersEnabled,
+                        selectedTimings = restoredTimings,
+                        annualMemoryReminderEnabled = parsed.restoredSettings.annualMemoryReminderEnabled
+                    )
+                    ReminderPreferences.saveSettings(appContext, currentUserId, restoredReminder)
+
+                    BackupManager.formatByteSize(summary.estimatedRestoreBytes) // validate helper accessibility
+                    Triple(parsed, restoredTheme, restoredReminder)
+                }
+            }
+
+            restoreResult.onSuccess { (parsed, restoredTheme, restoredReminder) ->
+                navAndModalState.update {
+                    it.copy(
+                        backupProgress = null,
+                        reminderSettings = restoredReminder,
+                        backupStatusDialogTitle = "Pemulihan Selesai",
+                        backupStatusDialogMessage = buildString {
+                            append("Berhasil memulihkan ")
+                            append("${parsed.newKunjungan.size} kunjungan pribadi, ")
+                            append("${parsed.newFotos.size} item media, dan pengaturan aplikasi.")
+                            if (parsed.skippedKunjunganCount > 0 || parsed.skippedFotoCount > 0) {
+                                append("\n\n${parsed.skippedKunjunganCount} kunjungan dan ${parsed.skippedFotoCount} media yang sudah ada dilewati agar tidak duplikat.")
+                            }
+                        },
+                        backupStatusIsError = false
+                    )
+                }
+                _themeRestoredEvents.trySend(restoredTheme)
+                rescheduleAllLocalReminders()
+                refreshBackupEstimate(appContext)
+            }.onFailure { err ->
+                navAndModalState.update {
+                    it.copy(
+                        backupProgress = null,
+                        backupStatusDialogTitle = "Gagal Memulihkan Cadangan",
+                        backupStatusDialogMessage = err.localizedMessage
+                            ?: "Terjadi kesalahan saat memulihkan data dari file cadangan.",
+                        backupStatusIsError = true
+                    )
+                }
+            }
+        }
+    }
+
+    fun dismissBackupStatusDialog() {
+        navAndModalState.update {
+            it.copy(
+                backupStatusDialogTitle = null,
+                backupStatusDialogMessage = null,
+                backupStatusIsError = false
+            )
+        }
+    }
+
     fun openVisitMemoryDetail(kunjunganId: String) {
         navAndModalState.update { it.copy(activeMemoryVisitId = kunjunganId) }
     }
@@ -1029,65 +1362,93 @@ class TripBuddyViewModel(
         }
     }
 
-    fun exportSingleMemoryPdf(context: Context, detail: VisitMemoryItem) {
+    fun openPdfExportDialog(
+        defaultScope: PdfExportScope,
+        selectedVisitId: String? = null,
+        selectedGroupUuid: String? = null
+    ) {
         if (navAndModalState.value.isExportingPdf) return
-        navAndModalState.update { it.copy(isExportingPdf = true) }
-        val appContext = context.applicationContext
-        viewModelScope.launch {
-            val spec = PdfExporter.buildSingleVisitPdfSpec(detail)
-            val result = withContext(Dispatchers.IO) {
-                PdfExporter.exportSpecToPdf(appContext, spec)
-            }
-            result.onSuccess { exported ->
-                navAndModalState.update {
-                    it.copy(isExportingPdf = false, exportedPdfResult = exported)
-                }
-            }.onFailure { error ->
-                navAndModalState.update { it.copy(isExportingPdf = false) }
-                _snackbarEvents.trySend(
-                    "Gagal mengekspor PDF: ${error.localizedMessage ?: "terjadi kesalahan"}"
+        val resolvedGroupUuid = selectedGroupUuid
+            ?: (navAndModalState.value.activeWorkspace as? Workspace.Shared)?.let { Trip.sharedTripUuid(it.tripId) }
+            ?: latestRoomSnapshot?.allTrips?.firstOrNull { !it.isPersonal }?.id
+        navAndModalState.update {
+            it.copy(
+                pdfAllowThisVisitScope = selectedVisitId != null,
+                pdfExportOptions = PdfExportOptions(
+                    scope = defaultScope,
+                    selectedVisitId = selectedVisitId,
+                    selectedGroupUuid = resolvedGroupUuid
                 )
-            }
+            )
         }
     }
 
-    fun exportGroupMemoriesPdf(
-        context: Context,
-        tripUuid: String,
-        groupTitle: String,
-        fallbackDateLabel: String = ""
-    ) {
+    fun updatePdfExportOptions(options: PdfExportOptions) {
+        navAndModalState.update { it.copy(pdfExportOptions = options) }
+    }
+
+    fun dismissPdfExportDialog() {
+        navAndModalState.update {
+            it.copy(pdfExportOptions = null, pdfAllowThisVisitScope = false)
+        }
+    }
+
+    fun confirmPdfExport(context: Context) {
+        val options = navAndModalState.value.pdfExportOptions ?: return
         if (navAndModalState.value.isExportingPdf) return
-        navAndModalState.update { it.copy(isExportingPdf = true) }
         val appContext = context.applicationContext
-        val roomSnapshot = latestRoomSnapshot
-        val visitsInGroup = roomSnapshot?.allKunjungan?.filter { it.tripId == tripUuid }
-            ?: uiState.value.visitMemories.filter { it.trip.id == tripUuid }.map { it.kunjungan }
-        val fotosByVisitId = roomSnapshot?.allFotos
-            ?.filter { it.tripId == tripUuid }
-            ?.groupBy { it.kunjunganId }
-            ?: uiState.value.visitMemories
-                .filter { it.trip.id == tripUuid }
-                .associate { it.kunjungan.id to it.fotos }
+
+        navAndModalState.update {
+            it.copy(
+                pdfExportOptions = null,
+                pdfAllowThisVisitScope = false,
+                isExportingPdf = true,
+                pdfExportProgress = PdfExportProgress(
+                    processedPhotos = 0,
+                    totalPhotos = 1,
+                    currentPage = 1
+                )
+            )
+        }
 
         viewModelScope.launch {
-            val spec = PdfExporter.buildGroupPdfSpec(
-                groupTitle = groupTitle,
-                kunjunganList = visitsInGroup,
-                fotosByVisitId = fotosByVisitId,
-                fallbackDateLabel = fallbackDateLabel
-            )
             val result = withContext(Dispatchers.IO) {
-                PdfExporter.exportSpecToPdf(appContext, spec)
+                val trips = localRepository.getAllTripsOnce()
+                val visits = localRepository.getAllKunjunganOnce()
+                val fotos = localRepository.getAllFotosOnce()
+                val spec = PdfExporter.buildPhotoAlbumSpec(
+                    options = options,
+                    allTrips = trips,
+                    allKunjungan = visits,
+                    allFotos = fotos
+                )
+                PdfExporter.exportPhotoAlbumToPdf(
+                    context = appContext,
+                    spec = spec,
+                    onProgress = { progress ->
+                        navAndModalState.update { state ->
+                            state.copy(pdfExportProgress = progress)
+                        }
+                    }
+                )
             }
             result.onSuccess { exported ->
                 navAndModalState.update {
-                    it.copy(isExportingPdf = false, exportedPdfResult = exported)
+                    it.copy(
+                        isExportingPdf = false,
+                        pdfExportProgress = null,
+                        exportedPdfResult = exported
+                    )
                 }
             }.onFailure { error ->
-                navAndModalState.update { it.copy(isExportingPdf = false) }
+                navAndModalState.update {
+                    it.copy(
+                        isExportingPdf = false,
+                        pdfExportProgress = null
+                    )
+                }
                 _snackbarEvents.trySend(
-                    "Gagal mengekspor PDF grup: ${error.localizedMessage ?: "terjadi kesalahan"}"
+                    "Gagal mengekspor album PDF: ${error.localizedMessage ?: "terjadi kesalahan"}"
                 )
             }
         }

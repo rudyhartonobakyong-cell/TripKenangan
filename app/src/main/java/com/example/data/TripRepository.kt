@@ -43,6 +43,8 @@ class TripRepository(
 
     suspend fun getAllKunjunganOnce(): List<Kunjungan> = kunjunganDao.getAllKunjunganOnce()
 
+    suspend fun getAllFotosOnce(): List<Foto> = fotoDao.getAllFotosOnce()
+
     suspend fun upsertKunjungan(kunjungan: Kunjungan) {
         ensurePersonalTripExists()
         kunjunganDao.upsertKunjungan(kunjungan)
@@ -217,6 +219,19 @@ class TripRepository(
         }
         if (remainingWithPhotos == 0) {
             tripDao.deleteTripById(tripUuid)
+        }
+    }
+
+    suspend fun restorePersonalBackupData(
+        newKunjungan: List<Kunjungan>,
+        newFotos: List<Foto>
+    ) {
+        ensurePersonalTripExists()
+        if (newKunjungan.isNotEmpty()) {
+            kunjunganDao.insertKunjunganIgnore(newKunjungan)
+        }
+        if (newFotos.isNotEmpty()) {
+            fotoDao.insertFotosIgnore(newFotos)
         }
     }
 }

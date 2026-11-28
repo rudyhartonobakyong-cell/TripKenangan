@@ -1,6 +1,8 @@
 package com.example.data
 
 import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Upsert
@@ -50,6 +52,9 @@ interface KunjunganDao {
 
     @Upsert
     suspend fun upsertKunjunganList(list: List<Kunjungan>)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertKunjunganIgnore(list: List<Kunjungan>)
 
     @Query("UPDATE kunjungan SET memoryNotes = :memoryNotes WHERE id = :kunjunganId")
     suspend fun updateMemoryNotes(kunjunganId: String, memoryNotes: String)

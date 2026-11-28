@@ -17,14 +17,30 @@ import com.example.ui.TripBuddyViewModel
 import com.example.ui.VisitMemoryItem
 import com.example.ui.Workspace
 import com.example.ui.theme.AppThemeOption
+import com.example.util.BackupCorruptException
+import com.example.util.BackupInsufficientSpaceException
+import com.example.util.BackupJsonCodec
+import com.example.util.BackupManager
+import com.example.util.BackupSettingsPayload
 import com.example.util.DateUtils
+import com.example.util.PdfExportOptions
+import com.example.util.PdfExportScope
 import com.example.util.PdfExporter
+import com.example.util.PdfGridLayout
+import com.example.util.PdfPageSize
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.nio.file.Files
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 
 class ExampleUnitTest {
 
@@ -378,73 +394,199 @@ class ExampleUnitTest {
   }
 
   @Test
-  fun `PdfExporter builds single visit and chronological group specs cleanly`() {
-    val day1 = DateUtils.epochDayFromYmd(2026, 9, 10)
-    val day2 = DateUtils.epochDayFromYmd(2026, 9, 12)
+  fun `DateUtils formatPhotoTimestamp formats Indonesian short month and 24h time`() {
+    val nov28 = DateUtils.epochDayFromYmd(2026, 10, 28) // Month 10 = November
+    val millis = DateUtils.targetMillisForVisit(nov28, 14, 32)
+    assertEquals("28 Nov 2026 14:32", DateUtils.formatPhotoTimestamp(millis))
+  }
 
-    val kLate = Kunjungan(
-      id = "k2",
-      tripId = Trip.sharedTripUuid("bali"),
-      locationName = "Ubud Monkey Forest",
-      visitDateEpochDay = day2,
-      visitHour = 10,
-      visitMinute = 30,
-      memoryNotes = "Hari kedua di Ubud"
-    )
-    val kEarlyAfternoon = Kunjungan(
-      id = "k1b",
-      tripId = Trip.sharedTripUuid("bali"),
-      locationName = "Tanah Lot",
-      visitDateEpochDay = day1,
-      visitHour = 17,
-      visitMinute = 0,
-      memoryNotes = "Sunset indah"
-    )
-    val kEarlyMorning = Kunjungan(
-      id = "k1a",
-      tripId = Trip.sharedTripUuid("bali"),
+  @Test
+  fun `PdfExporter computeGridMetrics produces 12mm margin, 6mm gap, and exact 1-to-1 square cells`() {
+    PdfPageSize.entries.forEach { pageSize ->
+      PdfGridLayout.entries.forEach { grid ->
+        val metrics = PdfExporter.computeGridMetrics(pageSize, grid)
+        assertEquals(PdfExporter.MARGIN_MM * PdfExporter.MM_TO_PT, metrics.marginPt, 0.01f)
+        assertEquals(PdfExporter.PHOTO_GAP_MM * PdfExporter.MM_TO_PT, metrics.gapPt, 0.01f)
+        assertTrue(metrics.cellSizePt > 10f)
+
+        val cell0 = metrics.cellBounds(0, grid.columns)
+        val cell1 = metrics.cellBounds(1, grid.columns)
+        assertEquals(cell0.width, cell0.height, 0.01f)
+        assertEquals(metrics.gapPt, cell1.left - cell0.right, 0.01f)
+      }
+    }
+
+    val a4 = PdfExporter.computeGridMetrics(PdfPageSize.A4_PORTRAIT, PdfGridLayout.GRID_2X3)
+    val square20 = PdfExporter.computeGridMetrics(PdfPageSize.SQUARE_20X20, PdfGridLayout.GRID_2X3)
+    assertTrue(a4.pageHeightPt > a4.pageWidthPt)
+    assertEquals(square20.pageWidthPt, square20.pageHeightPt)
+  }
+
+  @Test
+  fun `PdfExporter buildPhotoAlbumSpec excludes videos, separates visits onto new pages, and supports scopes and date range`() {
+    val defaultOpts = PdfExportOptions()
+    assertFalse(defaultOpts.includeCover)
+    assertTrue(defaultOpts.printTimestamp)
+    assertEquals(PdfGridLayout.GRID_2X3, defaultOpts.gridLayout)
+    assertEquals(PdfPageSize.A4_PORTRAIT, defaultOpts.pageSize)
+
+    val day1 = DateUtils.epochDayFromYmd(2026, 10, 28) // 28 Nov 2026
+    val day2 = DateUtils.epochDayFromYmd(2026, 10, 29) // 29 Nov 2026
+
+    val personalTrip = Trip.personalTrip()
+    val baliTrip = Trip(id = Trip.sharedTripUuid("bali"), name = "Bali 2026", isPersonal = false, remoteTripId = "bali")
+
+    val kSameDay1 = Kunjungan(
+      id = "k1",
+      tripId = baliTrip.id,
       locationName = "Tanjung Benoa",
       visitDateEpochDay = day1,
       visitHour = 8,
-      visitMinute = 15,
-      planNotes = "Pagi di pantai"
+      visitMinute = 0
+    )
+    val kSameDay2 = Kunjungan(
+      id = "k2",
+      tripId = baliTrip.id,
+      locationName = "Tanah Lot",
+      visitDateEpochDay = day1,
+      visitHour = 17,
+      visitMinute = 0
+    )
+    val kVideoOnly = Kunjungan(
+      id = "k3",
+      tripId = baliTrip.id,
+      locationName = "Video Only Spot",
+      visitDateEpochDay = day2,
+      visitHour = 10,
+      visitMinute = 0
+    )
+    val kPersonal = Kunjungan(
+      id = "kp",
+      tripId = personalTrip.id,
+      locationName = "Kafe Pribadi",
+      visitDateEpochDay = day2,
+      visitHour = 16,
+      visitMinute = 0
     )
 
-    val p1 = Foto(id = "p1", kunjunganId = kEarlyMorning.id, tripId = kEarlyMorning.tripId, filePath = "/a.jpg", createdAtMillis = 10L)
-    val v1 = Foto(id = "v1", kunjunganId = kEarlyAfternoon.id, tripId = kEarlyAfternoon.tripId, filePath = "/b.mp4", createdAtMillis = 20L, mediaType = Foto.MEDIA_TYPE_VIDEO)
-
-    val groupSpec = PdfExporter.buildGroupPdfSpec(
-      groupTitle = "Bali 2026",
-      kunjunganList = listOf(kLate, kEarlyAfternoon, kEarlyMorning),
-      fotosByVisitId = mapOf(
-        kEarlyMorning.id to listOf(p1),
-        kEarlyAfternoon.id to listOf(v1)
+    // 7 photos in Visit 1 (2x3 grid -> 6 + 1 = 2 pages) + 2 photos in Visit 2 (1 page)
+    val k1Photos = (1..7).map { idx ->
+      Foto(
+        id = "p1_$idx",
+        kunjunganId = kSameDay1.id,
+        tripId = baliTrip.id,
+        filePath = "/p1_$idx.jpg",
+        createdAtMillis = (1000L * (10 - idx)) // deliberately out of order
       )
+    }
+    val k2Photos = listOf(
+      Foto(id = "p2_1", kunjunganId = kSameDay2.id, tripId = baliTrip.id, filePath = "/p2_1.jpg", createdAtMillis = 200L),
+      Foto(id = "p2_2", kunjunganId = kSameDay2.id, tripId = baliTrip.id, filePath = "/p2_2.jpg", createdAtMillis = 100L)
+    )
+    val k2Video = Foto(
+      id = "v2_1",
+      kunjunganId = kSameDay2.id,
+      tripId = baliTrip.id,
+      filePath = "/v2_1.mp4",
+      mediaType = Foto.MEDIA_TYPE_VIDEO,
+      createdAtMillis = 300L
+    )
+    val k3VideoOnly = Foto(
+      id = "v3_1",
+      kunjunganId = kVideoOnly.id,
+      tripId = baliTrip.id,
+      filePath = "/v3_1.mp4",
+      mediaType = Foto.MEDIA_TYPE_VIDEO,
+      createdAtMillis = 400L
+    )
+    val kpPhoto = Foto(
+      id = "pp_1",
+      kunjunganId = kPersonal.id,
+      tripId = personalTrip.id,
+      filePath = "/pp_1.jpg",
+      createdAtMillis = 500L
     )
 
-    assertEquals("Bali 2026", groupSpec.coverTitle)
-    assertEquals("10 Okt 2026 – 12 Okt 2026", groupSpec.coverDateLabel)
-    assertEquals(3, groupSpec.pages.size)
-    assertEquals(1, groupSpec.totalPhotos)
-    assertEquals(1, groupSpec.totalVideos)
-    assertEquals("Tanjung Benoa", groupSpec.pages[0].locationName)
-    assertEquals("Tanah Lot", groupSpec.pages[1].locationName)
-    assertEquals("Ubud Monkey Forest", groupSpec.pages[2].locationName)
-    assertTrue(groupSpec.pages[1].mediaItems.first().isVideo)
+    val allTrips = listOf(personalTrip, baliTrip)
+    val allVisits = listOf(kPersonal, kSameDay2, kVideoOnly, kSameDay1)
+    val allFotos = k1Photos + k2Photos + listOf(k2Video, k3VideoOnly, kpPhoto)
 
-    val singleSpec = PdfExporter.buildSingleVisitPdfSpec(
-      VisitMemoryItem(
-        kunjungan = kEarlyAfternoon,
-        trip = Trip(id = Trip.sharedTripUuid("bali"), name = "Bali 2026", isPersonal = false),
-        fotos = listOf(p1, v1)
-      )
+    val groupSpec = PdfExporter.buildPhotoAlbumSpec(
+      options = PdfExportOptions(
+        scope = PdfExportScope.SPECIFIC_GROUP,
+        selectedGroupUuid = baliTrip.id
+      ),
+      allTrips = allTrips,
+      allKunjungan = allVisits,
+      allFotos = allFotos,
+      resolveTakenTimeMillis = { it.createdAtMillis }
     )
-    assertEquals("Tanah Lot", singleSpec.coverTitle)
-    assertEquals(1, singleSpec.pages.size)
-    assertEquals(1, singleSpec.totalPhotos)
-    assertEquals(1, singleSpec.totalVideos)
-    assertTrue(singleSpec.suggestedFileName.startsWith("TripBuddy_"))
-    assertTrue(singleSpec.suggestedFileName.endsWith(".pdf"))
+
+    // Videos and video-only visits must be completely excluded
+    assertEquals(2, groupSpec.visitSections.size)
+    assertEquals("k1", groupSpec.visitSections[0].kunjungan.id)
+    assertEquals("k2", groupSpec.visitSections[1].kunjungan.id)
+    assertEquals(9, groupSpec.totalPhotos)
+    // Visit 1: 2 pages (6, 1) + Visit 2: 1 page (2), no cover page by default
+    assertEquals(3, groupSpec.totalPages)
+    assertEquals(listOf(6, 1), groupSpec.visitSections[0].photoPages.map { it.size })
+    assertEquals(listOf(2), groupSpec.visitSections[1].photoPages.map { it.size })
+    // Chronological ordering of photos within visit
+    assertEquals("p1_7", groupSpec.visitSections[0].photos.first().foto.id)
+    assertEquals("p2_2", groupSpec.visitSections[1].photos.first().foto.id)
+    assertTrue(groupSpec.suggestedFileName.startsWith("TripBuddy_"))
+    assertTrue(groupSpec.suggestedFileName.endsWith(".pdf"))
+
+    val withCoverSpec = PdfExporter.buildPhotoAlbumSpec(
+      options = PdfExportOptions(
+        scope = PdfExportScope.SPECIFIC_GROUP,
+        selectedGroupUuid = baliTrip.id,
+        includeCover = true
+      ),
+      allTrips = allTrips,
+      allKunjungan = allVisits,
+      allFotos = allFotos,
+      resolveTakenTimeMillis = { it.createdAtMillis }
+    )
+    assertEquals(4, withCoverSpec.totalPages)
+
+    val personalSpec = PdfExporter.buildPhotoAlbumSpec(
+      options = PdfExportOptions(scope = PdfExportScope.PERSONAL_ONLY),
+      allTrips = allTrips,
+      allKunjungan = allVisits,
+      allFotos = allFotos,
+      resolveTakenTimeMillis = { it.createdAtMillis }
+    )
+    assertEquals(1, personalSpec.totalPhotos)
+    assertEquals("kp", personalSpec.visitSections.single().kunjungan.id)
+
+    val dateFilteredAllSpec = PdfExporter.buildPhotoAlbumSpec(
+      options = PdfExportOptions(
+        scope = PdfExportScope.ALL,
+        useDateRange = true,
+        startEpochDay = day2,
+        endEpochDay = day2
+      ),
+      allTrips = allTrips,
+      allKunjungan = allVisits,
+      allFotos = allFotos,
+      resolveTakenTimeMillis = { it.createdAtMillis }
+    )
+    assertEquals(1, dateFilteredAllSpec.totalPhotos)
+    assertEquals("kp", dateFilteredAllSpec.visitSections.single().kunjungan.id)
+
+    val singleVisitSpec = PdfExporter.buildPhotoAlbumSpec(
+      options = PdfExportOptions(
+        scope = PdfExportScope.THIS_VISIT,
+        selectedVisitId = kSameDay2.id
+      ),
+      allTrips = allTrips,
+      allKunjungan = allVisits,
+      allFotos = allFotos,
+      resolveTakenTimeMillis = { it.createdAtMillis }
+    )
+    assertEquals(2, singleVisitSpec.totalPhotos)
+    assertEquals(1, singleVisitSpec.totalPages)
   }
 
   @Test
@@ -537,5 +679,259 @@ class ExampleUnitTest {
       setOf(ReminderTimingOption.THREE_HOURS_BEFORE),
       ReminderTimingOption.fromIds(setOf("3_hours_before", "invalid"))
     )
+  }
+
+  @Test
+  fun `BackupJsonCodec round-trips special characters and rejects malformed JSON`() {
+    val payload = linkedMapOf<String, Any?>(
+      "title" to "Kenangan \"Bali\" \n Baris 2 \\ OK",
+      "count" to 42L,
+      "ok" to true,
+      "empty" to null,
+      "tags" to listOf("pantai", "kuliner")
+    )
+    val encoded = BackupJsonCodec.encodePretty(payload)
+    val decoded = BackupJsonCodec.decodeObject(encoded)
+    assertEquals("Kenangan \"Bali\" \n Baris 2 \\ OK", decoded["title"])
+    assertEquals(42L, decoded["count"])
+    assertEquals(true, decoded["ok"])
+    assertNull(decoded["empty"])
+    assertEquals(listOf("pantai", "kuliner"), decoded["tags"])
+
+    var failed = false
+    try {
+      BackupJsonCodec.decodeObject("{broken json")
+    } catch (_: BackupCorruptException) {
+      failed = true
+    }
+    assertTrue(failed)
+  }
+
+  @Test
+  fun `BackupManager exports personal data only, preserves media structure and original bytes, respects video toggle, and restores without duplicates`() {
+    val sourceFilesDir = Files.createTempDirectory("tb_src_files").toFile()
+    val destFilesDir = Files.createTempDirectory("tb_dst_files").toFile()
+    val zipDir = Files.createTempDirectory("tb_zip_out").toFile()
+
+    try {
+      val visitId1 = "visit-personal-1"
+      val visitId2 = "visit-personal-2"
+      val groupVisitId = "visit-group-1"
+      val groupTripId = Trip.sharedTripUuid("bali_group")
+
+      val photoDir = File(sourceFilesDir, "fotos/${Trip.PERSONAL_TRIP_ID}/$visitId1").apply { mkdirs() }
+      val photoFile = File(photoDir, "foto-1.jpg")
+      val originalPhotoBytes = ByteArray(2048) { idx -> ((idx * 17) % 251).toByte() }
+      photoFile.writeBytes(originalPhotoBytes)
+
+      val videoFile = File(photoDir, "video-1.mp4")
+      val originalVideoBytes = ByteArray(4096) { idx -> ((idx * 31) % 241).toByte() }
+      videoFile.writeBytes(originalVideoBytes)
+
+      val dayPast = DateUtils.epochDayFromYmd(2026, 9, 10)
+      val dayFuture = DateUtils.epochDayFromYmd(2027, 1, 15)
+
+      val k1 = Kunjungan(
+        id = visitId1,
+        tripId = Trip.PERSONAL_TRIP_ID,
+        locationName = "Pantai Kuta",
+        visitDateEpochDay = dayPast,
+        visitHour = 17,
+        visitMinute = 30,
+        memoryNotes = "Sunset pertama"
+      )
+      val k2 = Kunjungan(
+        id = visitId2,
+        tripId = Trip.PERSONAL_TRIP_ID,
+        locationName = "Ubud",
+        visitDateEpochDay = dayFuture,
+        visitHour = 10,
+        visitMinute = 0
+      )
+      val kGroup = Kunjungan(
+        id = groupVisitId,
+        tripId = groupTripId,
+        locationName = "Grup Only Spot",
+        visitDateEpochDay = dayPast,
+        remoteDocId = "doc_1",
+        remoteTripId = "bali_group"
+      )
+
+      val fPhoto = Foto(
+        id = "foto-1",
+        kunjunganId = visitId1,
+        tripId = Trip.PERSONAL_TRIP_ID,
+        filePath = photoFile.absolutePath,
+        mediaType = Foto.MEDIA_TYPE_PHOTO
+      )
+      val fVideo = Foto(
+        id = "video-1",
+        kunjunganId = visitId1,
+        tripId = Trip.PERSONAL_TRIP_ID,
+        filePath = videoFile.absolutePath,
+        mediaType = Foto.MEDIA_TYPE_VIDEO
+      )
+
+      // Estimate with & without video
+      val estWithVideo = BackupManager.computeBackupEstimate(
+        filesDir = sourceFilesDir,
+        personalKunjungan = listOf(k1, k2),
+        personalFotos = listOf(fPhoto, fVideo),
+        includeVideos = true,
+        todayEpochDay = dayPast + 1
+      )
+      val estWithoutVideo = BackupManager.computeBackupEstimate(
+        filesDir = sourceFilesDir,
+        personalKunjungan = listOf(k1, k2),
+        personalFotos = listOf(fPhoto, fVideo),
+        includeVideos = false,
+        todayEpochDay = dayPast + 1
+      )
+      assertEquals(1, estWithVideo.photoCount)
+      assertEquals(1, estWithVideo.videoCount)
+      assertEquals(0, estWithoutVideo.videoCount)
+      assertTrue(estWithVideo.estimatedZipBytes > estWithoutVideo.estimatedZipBytes)
+
+      // Export WITH videos
+      val zipWithVideo = File(zipDir, "backup_full.zip")
+      val settings = BackupSettingsPayload(
+        themeId = AppThemeOption.UNGU_SENJA.id,
+        remindersEnabled = false,
+        selectedTimingIds = listOf(ReminderTimingOption.THREE_HOURS_BEFORE.id),
+        annualMemoryReminderEnabled = false
+      )
+      val manifest = BackupManager.createBackupZipToFile(
+        filesDir = sourceFilesDir,
+        destZipFile = zipWithVideo,
+        personalTrip = Trip.personalTrip(),
+        personalKunjungan = listOf(k1, k2, kGroup),
+        personalFotos = listOf(fPhoto, fVideo),
+        settings = settings,
+        includeVideos = true,
+        todayEpochDay = dayPast + 1,
+        exportedAtMillis = 1_764_298_800_000L,
+        availableDestBytesProvider = { 500_000_000L }
+      )
+      assertEquals(2, manifest.kunjunganCount) // kGroup excluded!
+      assertEquals(1, manifest.memoryCount)
+      assertEquals(1, manifest.photoCount)
+      assertEquals(1, manifest.videoCount)
+
+      // Verify ZIP entries preserve folder structure and exclude group visits from data.json
+      ZipFile(zipWithVideo).use { zf ->
+        assertTrue(zf.getEntry("manifest.json") != null)
+        assertTrue(zf.getEntry("data.json") != null)
+        assertTrue(zf.getEntry("fotos/${Trip.PERSONAL_TRIP_ID}/$visitId1/foto-1.jpg") != null)
+        assertTrue(zf.getEntry("fotos/${Trip.PERSONAL_TRIP_ID}/$visitId1/video-1.mp4") != null)
+        val parsedData = BackupManager.parseDataJson(
+          zf.getInputStream(zf.getEntry("data.json")).bufferedReader().readText()
+        )
+        assertEquals(setOf(visitId1, visitId2), parsedData.kunjunganList.map { it.id }.toSet())
+      }
+
+      // Export WITHOUT videos
+      val zipNoVideo = File(zipDir, "backup_no_vid.zip")
+      val manifestNoVid = BackupManager.createBackupZipToFile(
+        filesDir = sourceFilesDir,
+        destZipFile = zipNoVideo,
+        personalTrip = Trip.personalTrip(),
+        personalKunjungan = listOf(k1, k2),
+        personalFotos = listOf(fPhoto, fVideo),
+        settings = settings,
+        includeVideos = false,
+        todayEpochDay = dayPast + 1,
+        availableDestBytesProvider = { 500_000_000L }
+      )
+      assertEquals(1, manifestNoVid.photoCount)
+      assertEquals(0, manifestNoVid.videoCount)
+      ZipFile(zipNoVideo).use { zf ->
+        assertNull(zf.getEntry("fotos/${Trip.PERSONAL_TRIP_ID}/$visitId1/video-1.mp4"))
+      }
+
+      // Restore onto clean destination, pre-populating k1 & fPhoto to verify zero duplication
+      val restoreResult = BackupManager.extractBackupZipFromStream(
+        streamProvider = { zipWithVideo.inputStream() },
+        filesDir = destFilesDir,
+        existingKunjunganIds = setOf(visitId1),
+        existingFotoIds = setOf("foto-1"),
+        expectedTotalBytes = manifest.totalMediaBytes,
+        expectedTotalMediaFiles = manifest.mediaFileCount,
+        availableDestBytesProvider = { 500_000_000L }
+      )
+      assertEquals(listOf(visitId2), restoreResult.newKunjungan.map { it.id })
+      assertEquals(1, restoreResult.skippedKunjunganCount)
+      assertEquals(listOf("video-1"), restoreResult.newFotos.map { it.id })
+      assertEquals(1, restoreResult.skippedFotoCount)
+      assertEquals(AppThemeOption.UNGU_SENJA.id, restoreResult.restoredSettings.themeId)
+
+      val restoredPhoto = File(destFilesDir, "fotos/${Trip.PERSONAL_TRIP_ID}/$visitId1/foto-1.jpg")
+      val restoredVideo = File(destFilesDir, "fotos/${Trip.PERSONAL_TRIP_ID}/$visitId1/video-1.mp4")
+      assertTrue(restoredPhoto.exists())
+      assertTrue(restoredVideo.exists())
+      assertArrayEquals(originalPhotoBytes, restoredPhoto.readBytes())
+      assertArrayEquals(originalVideoBytes, restoredVideo.readBytes())
+
+      // Low storage space error check
+      var lowSpaceThrown = false
+      try {
+        BackupManager.createBackupZipToFile(
+          filesDir = sourceFilesDir,
+          destZipFile = File(zipDir, "fail.zip"),
+          personalTrip = Trip.personalTrip(),
+          personalKunjungan = listOf(k1),
+          personalFotos = listOf(fPhoto),
+          settings = settings,
+          includeVideos = true,
+          todayEpochDay = dayPast + 1,
+          availableDestBytesProvider = { 1024L }
+        )
+      } catch (_: BackupInsufficientSpaceException) {
+        lowSpaceThrown = true
+      }
+      assertTrue(lowSpaceThrown)
+
+      // Corrupt / unsafe path checks
+      var corruptThrown = false
+      try {
+        BackupManager.extractBackupZipFromStream(
+          streamProvider = { ByteArrayInputStream("not a zip".toByteArray()) },
+          filesDir = destFilesDir,
+          existingKunjunganIds = emptySet(),
+          existingFotoIds = emptySet(),
+          expectedTotalBytes = 0L,
+          expectedTotalMediaFiles = 0,
+          availableDestBytesProvider = { 500_000_000L }
+        )
+      } catch (_: BackupCorruptException) {
+        corruptThrown = true
+      }
+      assertTrue(corruptThrown)
+
+      val traversalZip = File(zipDir, "bad_traversal.zip")
+      ZipOutputStream(traversalZip.outputStream()).use { zos ->
+        zos.putNextEntry(ZipEntry("../../evil.txt"))
+        zos.write("x".toByteArray())
+        zos.closeEntry()
+      }
+      var traversalBlocked = false
+      try {
+        BackupManager.extractBackupZipFromStream(
+          streamProvider = { traversalZip.inputStream() },
+          filesDir = destFilesDir,
+          existingKunjunganIds = emptySet(),
+          existingFotoIds = emptySet(),
+          expectedTotalBytes = 0L,
+          expectedTotalMediaFiles = 0,
+          availableDestBytesProvider = { 500_000_000L }
+        )
+      } catch (_: BackupCorruptException) {
+        traversalBlocked = true
+      }
+      assertTrue(traversalBlocked)
+    } finally {
+      sourceFilesDir.deleteRecursively()
+      destFilesDir.deleteRecursively()
+      zipDir.deleteRecursively()
+    }
   }
 }

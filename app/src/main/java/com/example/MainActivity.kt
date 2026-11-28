@@ -15,7 +15,22 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.Crossfade
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -88,6 +103,9 @@ import com.example.ui.TripBuddyViewModel
 import com.example.ui.TripTab
 import com.example.ui.components.AccountProfileSheet
 import com.example.ui.components.AddLocationSheet
+import com.example.ui.components.BackupImportConfirmDialog
+import com.example.ui.components.BackupProgressDialog
+import com.example.ui.components.BackupStatusDialog
 import com.example.ui.components.CameraCaptureModeDialog
 import com.example.ui.components.CameraVisitPickerDialog
 import com.example.ui.components.CollabWorkspaceBar
@@ -95,6 +113,8 @@ import com.example.ui.components.CreateSharedTripDialog
 import com.example.ui.components.InviteMemberSheet
 import com.example.ui.components.JoinTripByCodeDialog
 import com.example.ui.components.MapsSearchSheet
+import com.example.ui.components.PdfExportOptionsSheet
+import com.example.ui.components.PdfExportProgressDialog
 import com.example.ui.components.PdfExportReadyDialog
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.CalendarScreen
@@ -106,6 +126,7 @@ import com.example.ui.screens.VisitMemoryDetailScreen
 import com.example.ui.theme.AppThemeOption
 import com.example.ui.theme.ThemePreferences
 import com.example.ui.theme.TripBuddyTheme
+import com.example.util.PdfExportScope
 import com.example.util.PdfExporter
 import com.example.util.PhotoStorageHelper
 import com.google.firebase.Firebase
@@ -433,9 +454,49 @@ fun TripBuddyApp(
         }
     }
 
+    val importBackupZipLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.inspectBackupZipForImport(context, uri)
+        }
+    }
+
     LaunchedEffect(viewModel) {
         viewModel.snackbarEvents.collect { msg ->
             snackbarHostState.showSnackbar(msg)
+        }
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.shareBackupEvents.collect { exported ->
+            try {
+                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "application/zip"
+                    putExtra(Intent.EXTRA_STREAM, exported.contentUri)
+                    putExtra(Intent.EXTRA_SUBJECT, exported.fileName)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                context.startActivity(
+                    Intent.createChooser(shareIntent, "Simpan atau Bagikan Cadangan TripBuddy")
+                )
+            } catch (e: Exception) {
+                showMessage(
+                    "File cadangan siap (${exported.fileName}), namun dialog bagikan gagal dibuka: ${e.localizedMessage ?: "periksa aplikasi tujuan"}"
+                )
+            }
+        }
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.themeRestoredEvents.collect { restoredTheme ->
+            onSelectTheme(restoredTheme)
+        }
+    }
+
+    LaunchedEffect(uiState.showAccountSheet, uiState.backupIncludeVideos) {
+        if (uiState.showAccountSheet) {
+            viewModel.refreshBackupEstimate(context, uiState.backupIncludeVideos)
         }
     }
 
@@ -571,10 +632,9 @@ fun TripBuddyApp(
             onBack = viewModel::closeMembersScreen,
             onInviteClick = { viewModel.openInviteSheet(activeGroup) },
             onExportGroupPdf = {
-                viewModel.exportGroupMemoriesPdf(
-                    context = context,
-                    tripUuid = Trip.sharedTripUuid(activeGroup.id),
-                    groupTitle = activeGroup.title
+                viewModel.openPdfExportDialog(
+                    defaultScope = PdfExportScope.SPECIFIC_GROUP,
+                    selectedGroupUuid = Trip.sharedTripUuid(activeGroup.id)
                 )
             },
             onTransferAdmin = { newAdmin -> viewModel.transferGroupAdmin(activeGroup, newAdmin) },
@@ -591,7 +651,13 @@ fun TripBuddyApp(
             onDeletePhoto = { media -> viewModel.deleteMemoryPhoto(media, context.filesDir) },
             onSaveMemoryNotes = { kunjungan, notes -> viewModel.saveMemoryNotes(kunjungan, notes) },
             onOpenMapsForVisit = { visit -> viewModel.openMapsSearchSheet(visit) },
-            onExportPdf = { viewModel.exportSingleMemoryPdf(context, detail) }
+            onExportPdf = {
+                viewModel.openPdfExportDialog(
+                    defaultScope = PdfExportScope.THIS_VISIT,
+                    selectedVisitId = detail.kunjungan.id,
+                    selectedGroupUuid = detail.trip.id.takeIf { !detail.trip.isPersonal }
+                )
+            }
         )
     } else {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -604,8 +670,19 @@ fun TripBuddyApp(
                 contentWindowInsets = WindowInsets.safeDrawing,
                 snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
                 floatingActionButton = {
-                    if (!isInGroupDirectory &&
-                        (uiState.selectedTab == TripTab.BERANDA || uiState.selectedTab == TripTab.KENANGAN)
+                    AnimatedVisibility(
+                        visible = !isInGroupDirectory &&
+                            (uiState.selectedTab == TripTab.BERANDA || uiState.selectedTab == TripTab.KENANGAN),
+                        enter = fadeIn(animationSpec = tween(durationMillis = 220)) +
+                            scaleIn(
+                                initialScale = 0.88f,
+                                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                            ),
+                        exit = fadeOut(animationSpec = tween(durationMillis = 160)) +
+                            scaleOut(
+                                targetScale = 0.88f,
+                                animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)
+                            )
                     ) {
                         ExtendedFloatingActionButton(
                             onClick = viewModel::openCameraVisitPicker,
@@ -732,9 +809,11 @@ fun TripBuddyApp(
                                     onInviteGroup = { trip -> viewModel.openInviteSheet(trip) }
                                 )
                             } else {
-                                Crossfade(
+                                AnimatedContent(
                                     targetState = uiState.selectedTab,
-                                    label = "TripTabTransition"
+                                    transitionSpec = { tripTabContentTransform() },
+                                    label = "TripTabTransition",
+                                    modifier = Modifier.fillMaxSize()
                                 ) { currentTab ->
                                     when (currentTab) {
                                         TripTab.BERANDA -> HomeScreen(
@@ -798,12 +877,17 @@ fun TripBuddyApp(
                                             onSelectMemoryGroup = viewModel::selectMemoryGroup,
                                             onVisitMemoryClick = viewModel::openVisitMemoryDetail,
                                             onExportGroupPdf = { summary ->
-                                                viewModel.exportGroupMemoriesPdf(
-                                                    context = context,
-                                                    tripUuid = summary.trip.id,
-                                                    groupTitle = summary.trip.name,
-                                                    fallbackDateLabel = summary.dateRangeLabel
+                                                viewModel.openPdfExportDialog(
+                                                    defaultScope = PdfExportScope.SPECIFIC_GROUP,
+                                                    selectedGroupUuid = summary.trip.id
                                                 )
+                                            },
+                                            onExportPdf = {
+                                                val defaultScope = when (uiState.selectedMemoriesTab) {
+                                                    com.example.ui.MemoriesFilterTab.PRIBADI -> PdfExportScope.PERSONAL_ONLY
+                                                    else -> PdfExportScope.ALL
+                                                }
+                                                viewModel.openPdfExportDialog(defaultScope = defaultScope)
                                             }
                                         )
                                     }
@@ -836,6 +920,26 @@ fun TripBuddyApp(
             onSelectPhoto = { startPhotoCaptureForVisit(chosenVisit) },
             onSelectVideo = { startVideoCaptureForVisit(chosenVisit) }
         )
+    }
+
+    uiState.pdfExportOptions?.let { options ->
+        val previewSpec = uiState.pdfExportPreviewSpec
+        if (previewSpec != null) {
+            PdfExportOptionsSheet(
+                options = options,
+                allowThisVisitScope = uiState.pdfAllowThisVisitScope,
+                groupTrips = uiState.allTrips.filter { !it.isPersonal },
+                previewSpec = previewSpec,
+                isExporting = uiState.isExportingPdf,
+                onUpdateOptions = viewModel::updatePdfExportOptions,
+                onConfirmExport = { viewModel.confirmPdfExport(context) },
+                onDismiss = viewModel::dismissPdfExportDialog
+            )
+        }
+    }
+
+    uiState.pdfExportProgress?.let { progress ->
+        PdfExportProgressDialog(progress = progress)
     }
 
     uiState.exportedPdfResult?.let { exported ->
@@ -912,6 +1016,19 @@ fun TripBuddyApp(
                 }
             },
             onOpenBatteryAppInfo = openBatteryAppInfoSettings,
+            backupIncludeVideos = uiState.backupIncludeVideos,
+            backupEstimate = uiState.backupEstimate,
+            isEstimatingBackup = uiState.isEstimatingBackup,
+            isBackupBusy = uiState.backupProgress != null,
+            onToggleBackupIncludeVideos = { include ->
+                viewModel.setBackupIncludeVideos(context, include)
+            },
+            onExportBackupClick = {
+                viewModel.exportPersonalBackup(context)
+            },
+            onImportBackupClick = {
+                importBackupZipLauncher.launch(arrayOf("*/*"))
+            },
             projectId = uiState.activeProjectId,
             databaseId = uiState.activeDatabaseId,
             isTestingFirestore = uiState.isTestingFirestore,
@@ -926,6 +1043,27 @@ fun TripBuddyApp(
                     scope = coroutineScope
                 )
             }
+        )
+    }
+
+    uiState.backupProgress?.let { progress ->
+        BackupProgressDialog(progress = progress)
+    }
+
+    uiState.pendingBackupImportSummary?.let { summary ->
+        BackupImportConfirmDialog(
+            summary = summary,
+            onConfirm = { viewModel.confirmBackupRestore(context) },
+            onDismiss = viewModel::dismissBackupImportConfirm
+        )
+    }
+
+    if (!uiState.backupStatusDialogTitle.isNullOrBlank() && !uiState.backupStatusDialogMessage.isNullOrBlank()) {
+        BackupStatusDialog(
+            title = uiState.backupStatusDialogTitle!!,
+            message = uiState.backupStatusDialogMessage!!,
+            isError = uiState.backupStatusIsError,
+            onDismiss = viewModel::dismissBackupStatusDialog
         )
     }
 
@@ -1012,5 +1150,33 @@ fun TripBuddyApp(
             },
             onShowMessage = showMessage
         )
+    }
+}
+
+private fun AnimatedContentTransitionScope<TripTab>.tripTabContentTransform(): ContentTransform {
+    val direction = targetState.ordinal.compareTo(initialState.ordinal)
+    return if (direction == 0) {
+        (fadeIn(animationSpec = tween(durationMillis = 180)) togetherWith
+            fadeOut(animationSpec = tween(durationMillis = 150)))
+            .using(SizeTransform(clip = false))
+    } else {
+        val enterOffsetFraction = if (direction > 0) 0.16f else -0.16f
+        val exitOffsetFraction = if (direction > 0) -0.10f else 0.10f
+        val enter = slideInHorizontally(
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioNoBouncy,
+                stiffness = Spring.StiffnessMediumLow
+            ),
+            initialOffsetX = { fullWidth -> (fullWidth * enterOffsetFraction).toInt() }
+        ) + fadeIn(
+            animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing)
+        )
+        val exit = slideOutHorizontally(
+            animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
+            targetOffsetX = { fullWidth -> (fullWidth * exitOffsetFraction).toInt() }
+        ) + fadeOut(
+            animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)
+        )
+        (enter togetherWith exit).using(SizeTransform(clip = false))
     }
 }

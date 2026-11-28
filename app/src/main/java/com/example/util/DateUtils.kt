@@ -124,6 +124,24 @@ object DateUtils {
         return String.format(Locale.US, "%02d:%02d", hour.coerceIn(0, 23), minute.coerceIn(0, 59))
     }
 
+    fun formatPhotoTimestamp(millis: Long): String {
+        val local = Calendar.getInstance().apply { timeInMillis = millis }
+        val day = local.get(Calendar.DAY_OF_MONTH)
+        val monthName = indonesianShortMonths.getOrElse(local.get(Calendar.MONTH)) { "" }
+        val year = local.get(Calendar.YEAR)
+        val hour = local.get(Calendar.HOUR_OF_DAY)
+        val minute = local.get(Calendar.MINUTE)
+        return String.format(Locale.US, "%d %s %d %02d:%02d", day, monthName, year, hour, minute)
+    }
+
+    fun epochDayFromUtcPickerMillis(utcMillis: Long): Long {
+        return utcMillis / MILLIS_PER_DAY
+    }
+
+    fun utcPickerMillisFromEpochDay(epochDay: Long): Long {
+        return epochDay * MILLIS_PER_DAY
+    }
+
     fun computeCountdownParts(
         visitEpochDay: Long,
         visitHour: Int,

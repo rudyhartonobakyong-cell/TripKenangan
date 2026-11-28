@@ -8,7 +8,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
@@ -24,106 +23,295 @@ import android.text.TextPaint
 import android.text.TextUtils
 import com.example.data.Foto
 import com.example.data.Kunjungan
-import com.example.ui.VisitMemoryItem
+import com.example.data.Trip
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
-data class PdfVisitPage(
-    val locationName: String,
-    val dateEpochDay: Long,
-    val visitHour: Int,
-    val visitMinute: Int,
+enum class PdfPageSize(
+    val label: String,
     val description: String,
-    val mediaItems: List<Foto>
+    val widthMm: Float,
+    val heightMm: Float
 ) {
-    val photoCount: Int get() = mediaItems.count { !it.isVideo }
-    val videoCount: Int get() = mediaItems.count { it.isVideo }
+    A4_PORTRAIT(
+        label = "A4 Portrait",
+        description = "210 × 297 mm",
+        widthMm = 210f,
+        heightMm = 297f
+    ),
+    SQUARE_20X20(
+        label = "Persegi 20×20 cm",
+        description = "200 × 200 mm",
+        widthMm = 200f,
+        heightMm = 200f
+    );
+
+    val widthPt: Int get() = (widthMm * PdfExporter.MM_TO_PT).roundToInt()
+    val heightPt: Int get() = (heightMm * PdfExporter.MM_TO_PT).roundToInt()
 }
 
-data class PdfExportSpec(
+enum class PdfGridLayout(
+    val label: String,
+    val columns: Int,
+    val rows: Int
+) {
+    GRID_2X3(label = "2 × 3", columns = 2, rows = 3),
+    GRID_2X2(label = "2 × 2", columns = 2, rows = 2),
+    GRID_3X3(label = "3 × 3", columns = 3, rows = 3);
+
+    val photosPerPage: Int get() = columns * rows
+}
+
+enum class PdfExportScope(val label: String) {
+    THIS_VISIT("Kunjungan ini"),
+    ALL("Semua"),
+    PERSONAL_ONLY("Pribadi saja"),
+    SPECIFIC_GROUP("Grup tertentu")
+}
+
+data class PdfExportOptions(
+    val scope: PdfExportScope = PdfExportScope.ALL,
+    val selectedVisitId: String? = null,
+    val selectedGroupUuid: String? = null,
+    val useDateRange: Boolean = false,
+    val startEpochDay: Long? = null,
+    val endEpochDay: Long? = null,
+    val gridLayout: PdfGridLayout = PdfGridLayout.GRID_2X3,
+    val pageSize: PdfPageSize = PdfPageSize.A4_PORTRAIT,
+    val printTimestamp: Boolean = true,
+    val includeCover: Boolean = false
+)
+
+data class PdfAlbumPhoto(
+    val foto: Foto,
+    val takenAtMillis: Long
+)
+
+data class PdfVisitPhotoSection(
+    val kunjungan: Kunjungan,
+    val photos: List<PdfAlbumPhoto>,
+    val photoPages: List<List<PdfAlbumPhoto>>
+)
+
+data class PdfPhotoAlbumSpec(
+    val options: PdfExportOptions,
     val coverTitle: String,
     val coverDateLabel: String,
-    val coverSubtitle: String,
     val suggestedFileName: String,
-    val pages: List<PdfVisitPage>
-) {
-    val totalPhotos: Int get() = pages.sumOf { it.photoCount }
-    val totalVideos: Int get() = pages.sumOf { it.videoCount }
-}
+    val visitSections: List<PdfVisitPhotoSection>,
+    val totalPhotos: Int,
+    val totalPages: Int
+)
+
+data class PdfExportProgress(
+    val processedPhotos: Int,
+    val totalPhotos: Int,
+    val currentPage: Int
+)
 
 data class ExportedPdfResult(
     val cacheFile: File,
     val contentUri: Uri,
     val fileName: String,
     val savedLocationNote: String,
-    val pageCount: Int
+    val pageCount: Int,
+    val photoCount: Int
 )
+
+data class PdfCellBounds(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float
+) {
+    val width: Float get() = right - left
+    val height: Float get() = bottom - top
+    fun toRectF(): RectF = RectF(left, top, right, bottom)
+}
+
+data class PdfGridMetrics(
+    val pageWidthPt: Int,
+    val pageHeightPt: Int,
+    val marginPt: Float,
+    val gapPt: Float,
+    val cellSizePt: Float,
+    val startXPt: Float,
+    val startYPt: Float
+) {
+    fun cellBounds(indexOnPage: Int, columns: Int): PdfCellBounds {
+        val col = indexOnPage % columns
+        val row = indexOnPage / columns
+        val left = startXPt + col * (cellSizePt + gapPt)
+        val top = startYPt + row * (cellSizePt + gapPt)
+        return PdfCellBounds(left = left, top = top, right = left + cellSizePt, bottom = top + cellSizePt)
+    }
+
+    fun cellRect(indexOnPage: Int, columns: Int): RectF {
+        return cellBounds(indexOnPage, columns).toRectF()
+    }
+}
 
 object PdfExporter {
 
-    private const val PAGE_WIDTH = 595
-    private const val PAGE_HEIGHT = 842
-    private const val MARGIN_H = 42f
-    private const val CONTENT_WIDTH = PAGE_WIDTH - (MARGIN_H * 2)
-    private const val PDF_EXPORT_DIR = "pdf_exports"
-    private const val MAX_MEDIA_PER_PAGE = 4
+    const val MM_TO_PT = 72f / 25.4f
+    const val MARGIN_MM = 12f
+    const val PHOTO_GAP_MM = 6f
+    const val MIN_SQUARE_PX = 1200
+    const val MAX_SQUARE_PX = 2000
+    const val JPEG_QUALITY = 90
 
-    fun buildSingleVisitPdfSpec(detail: VisitMemoryItem): PdfExportSpec {
-        val k = detail.kunjungan
-        val desc = k.memoryNotes.ifBlank { k.planNotes }.trim()
-        val page = PdfVisitPage(
-            locationName = k.locationName,
-            dateEpochDay = k.visitDateEpochDay,
-            visitHour = k.visitHour,
-            visitMinute = k.visitMinute,
-            description = desc,
-            mediaItems = detail.fotos.sortedBy { it.createdAtMillis }
-        )
-        return PdfExportSpec(
-            coverTitle = k.locationName,
-            coverDateLabel = DateUtils.formatIndonesianFullDate(k.visitDateEpochDay),
-            coverSubtitle = "Kenangan Kunjungan • ${detail.trip.name}",
-            suggestedFileName = buildPdfFileName("Kenangan_${k.locationName}"),
-            pages = listOf(page)
+    private const val PDF_EXPORT_DIR = "pdf_exports"
+
+    fun computeGridMetrics(pageSize: PdfPageSize, grid: PdfGridLayout): PdfGridMetrics {
+        val pageW = pageSize.widthPt
+        val pageH = pageSize.heightPt
+        val marginPt = MARGIN_MM * MM_TO_PT
+        val gapPt = PHOTO_GAP_MM * MM_TO_PT
+
+        val contentW = pageW - (2f * marginPt)
+        val contentH = pageH - (2f * marginPt)
+        val maxCellW = (contentW - gapPt * (grid.columns - 1)) / grid.columns.toFloat()
+        val maxCellH = (contentH - gapPt * (grid.rows - 1)) / grid.rows.toFloat()
+        val cellSizePt = minOf(maxCellW, maxCellH).coerceAtLeast(10f)
+
+        val totalGridW = cellSizePt * grid.columns + gapPt * (grid.columns - 1)
+        val totalGridH = cellSizePt * grid.rows + gapPt * (grid.rows - 1)
+        val startXPt = marginPt + (contentW - totalGridW) / 2f
+        val startYPt = marginPt + (contentH - totalGridH) / 2f
+
+        return PdfGridMetrics(
+            pageWidthPt = pageW,
+            pageHeightPt = pageH,
+            marginPt = marginPt,
+            gapPt = gapPt,
+            cellSizePt = cellSizePt,
+            startXPt = startXPt,
+            startYPt = startYPt
         )
     }
 
-    fun buildGroupPdfSpec(
-        groupTitle: String,
-        kunjunganList: List<Kunjungan>,
-        fotosByVisitId: Map<String, List<Foto>>,
-        fallbackDateLabel: String = ""
-    ): PdfExportSpec {
-        val sortedVisits = kunjunganList.sortedWith(
+    fun buildPhotoAlbumSpec(
+        options: PdfExportOptions,
+        allTrips: List<Trip>,
+        allKunjungan: List<Kunjungan>,
+        allFotos: List<Foto>,
+        resolveTakenTimeMillis: (Foto) -> Long = { resolvePhotoTakenMillis(it) }
+    ): PdfPhotoAlbumSpec {
+        val tripById = allTrips.associateBy { it.id }
+
+        val scopeFilteredVisits = allKunjungan.filter { kunjungan ->
+            when (options.scope) {
+                PdfExportScope.THIS_VISIT -> kunjungan.id == options.selectedVisitId
+                PdfExportScope.ALL -> true
+                PdfExportScope.PERSONAL_ONLY -> kunjungan.tripId == Trip.PERSONAL_TRIP_ID
+                PdfExportScope.SPECIFIC_GROUP -> {
+                    options.selectedGroupUuid != null && kunjungan.tripId == options.selectedGroupUuid
+                }
+            }
+        }
+
+        val normalizedRange = if (options.useDateRange) {
+            val rawStart = options.startEpochDay
+            val rawEnd = options.endEpochDay
+            if (rawStart != null && rawEnd != null) {
+                minOf(rawStart, rawEnd) to maxOf(rawStart, rawEnd)
+            } else {
+                rawStart to rawEnd
+            }
+        } else {
+            null to null
+        }
+
+        val dateFilteredVisits = scopeFilteredVisits.filter { kunjungan ->
+            if (!options.useDateRange) {
+                true
+            } else {
+                val afterStart = normalizedRange.first == null || kunjungan.visitDateEpochDay >= normalizedRange.first!!
+                val beforeEnd = normalizedRange.second == null || kunjungan.visitDateEpochDay <= normalizedRange.second!!
+                afterStart && beforeEnd
+            }
+        }
+
+        val sortedVisits = dateFilteredVisits.sortedWith(
             compareBy<Kunjungan> { it.visitDateEpochDay }
                 .thenBy { it.visitHour }
                 .thenBy { it.visitMinute }
                 .thenBy { it.createdAtMillis }
         )
-        val distinctDays = sortedVisits.map { it.visitDateEpochDay }.distinct()
-        val dateRangeLabel = when {
-            distinctDays.isEmpty() -> fallbackDateLabel.ifBlank { "Belum ada tanggal kunjungan" }
+
+        // Exclude videos completely; only include photos grouped by kunjunganId
+        val photosByVisitId = allFotos
+            .filter { !it.isVideo }
+            .groupBy { it.kunjunganId }
+
+        val perPage = options.gridLayout.photosPerPage
+        val visitSections = sortedVisits.mapNotNull { visit ->
+            val rawPhotos = photosByVisitId[visit.id].orEmpty()
+            if (rawPhotos.isEmpty()) return@mapNotNull null
+
+            val albumPhotos = rawPhotos
+                .map { foto -> PdfAlbumPhoto(foto = foto, takenAtMillis = resolveTakenTimeMillis(foto)) }
+                .sortedWith(
+                    compareBy<PdfAlbumPhoto> { it.takenAtMillis }
+                        .thenBy { it.foto.createdAtMillis }
+                        .thenBy { it.foto.id }
+                )
+
+            val chunks = albumPhotos.chunked(perPage)
+            PdfVisitPhotoSection(
+                kunjungan = visit,
+                photos = albumPhotos,
+                photoPages = chunks
+            )
+        }
+
+        val totalPhotos = visitSections.sumOf { it.photos.size }
+        val photoPageCount = visitSections.sumOf { it.photoPages.size }
+        val totalPages = if (totalPhotos == 0) {
+            0
+        } else {
+            photoPageCount + if (options.includeCover) 1 else 0
+        }
+
+        val distinctDays = visitSections.map { it.kunjungan.visitDateEpochDay }.distinct()
+        val coverDateLabel = when {
+            distinctDays.isEmpty() -> ""
             distinctDays.size == 1 -> DateUtils.formatIndonesianFullDate(distinctDays.first())
             else -> "${DateUtils.formatIndonesianShortDate(distinctDays.min())} – ${DateUtils.formatIndonesianShortDate(distinctDays.max())}"
         }
-        val pages = sortedVisits.map { k ->
-            PdfVisitPage(
-                locationName = k.locationName,
-                dateEpochDay = k.visitDateEpochDay,
-                visitHour = k.visitHour,
-                visitMinute = k.visitMinute,
-                description = k.memoryNotes.ifBlank { k.planNotes }.trim(),
-                mediaItems = fotosByVisitId[k.id].orEmpty().sortedBy { it.createdAtMillis }
-            )
+
+        val coverTitle = when (options.scope) {
+            PdfExportScope.THIS_VISIT -> {
+                visitSections.firstOrNull()?.kunjungan?.locationName
+                    ?: allKunjungan.find { it.id == options.selectedVisitId }?.locationName
+                    ?: "Album Foto"
+            }
+            PdfExportScope.ALL -> "Album Foto TripBuddy"
+            PdfExportScope.PERSONAL_ONLY -> "Album Foto Pribadi"
+            PdfExportScope.SPECIFIC_GROUP -> {
+                tripById[options.selectedGroupUuid]?.name ?: "Album Foto Grup"
+            }
         }
-        return PdfExportSpec(
-            coverTitle = groupTitle.ifBlank { "Album Kenangan Grup" },
-            coverDateLabel = dateRangeLabel,
-            coverSubtitle = "Album Kenangan Grup TripBuddy",
-            suggestedFileName = buildPdfFileName("Grup_${groupTitle}"),
-            pages = pages
+
+        val fileSlug = when (options.scope) {
+            PdfExportScope.THIS_VISIT -> "Album_${coverTitle}"
+            PdfExportScope.ALL -> "Album_Semua"
+            PdfExportScope.PERSONAL_ONLY -> "Album_Pribadi"
+            PdfExportScope.SPECIFIC_GROUP -> "Album_${coverTitle}"
+        }
+
+        return PdfPhotoAlbumSpec(
+            options = options,
+            coverTitle = coverTitle,
+            coverDateLabel = coverDateLabel,
+            suggestedFileName = buildPdfFileName(fileSlug),
+            visitSections = visitSections,
+            totalPhotos = totalPhotos,
+            totalPages = totalPages
         )
     }
 
@@ -133,27 +321,77 @@ object PdfExporter {
             .replace(Regex("[^A-Za-z0-9]+"), "_")
             .trim('_')
             .take(36)
-            .ifBlank { "TripBuddy" }
+            .ifBlank { "TripBuddy_Album" }
         val stamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date(timestampMillis))
         return "TripBuddy_${slug}_$stamp.pdf"
     }
 
-    fun exportSpecToPdf(context: Context, spec: PdfExportSpec): Result<ExportedPdfResult> = runCatching {
+    fun exportPhotoAlbumToPdf(
+        context: Context,
+        spec: PdfPhotoAlbumSpec,
+        onProgress: (PdfExportProgress) -> Unit = {}
+    ): Result<ExportedPdfResult> = runCatching {
+        if (spec.totalPhotos == 0 || spec.visitSections.isEmpty()) {
+            throw IllegalStateException("Tidak ada foto dalam cakupan yang dipilih.")
+        }
+
+        val metrics = computeGridMetrics(spec.options.pageSize, spec.options.gridLayout)
         val pdfDocument = PdfDocument()
         try {
-            drawCoverPage(pdfDocument, spec)
-            if (spec.pages.isEmpty()) {
-                drawEmptyGroupNoticePage(pdfDocument, spec.coverTitle)
-            } else {
-                spec.pages.forEachIndexed { index, visitPage ->
-                    drawVisitPage(
-                        context = context,
-                        pdfDocument = pdfDocument,
-                        pageNumber = index + 2,
-                        visitIndex = index + 1,
-                        totalVisits = spec.pages.size,
-                        visitPage = visitPage
-                    )
+            var pageNumber = 0
+            var processedPhotos = 0
+
+            if (spec.options.includeCover) {
+                pageNumber += 1
+                drawMinimalCoverPage(
+                    pdfDocument = pdfDocument,
+                    pageNumber = pageNumber,
+                    metrics = metrics,
+                    spec = spec
+                )
+            }
+
+            onProgress(
+                PdfExportProgress(
+                    processedPhotos = 0,
+                    totalPhotos = spec.totalPhotos,
+                    currentPage = pageNumber.coerceAtLeast(1)
+                )
+            )
+
+            spec.visitSections.forEach { section ->
+                section.photoPages.forEach { pagePhotos ->
+                    pageNumber += 1
+                    val pageInfo = PdfDocument.PageInfo.Builder(
+                        metrics.pageWidthPt,
+                        metrics.pageHeightPt,
+                        pageNumber
+                    ).create()
+                    val page = pdfDocument.startPage(pageInfo)
+                    try {
+                        val canvas = page.canvas
+                        canvas.drawColor(Color.WHITE)
+
+                        pagePhotos.forEachIndexed { slotIndex, albumPhoto ->
+                            val cellRect = metrics.cellRect(slotIndex, spec.options.gridLayout.columns)
+                            drawSquarePhotoSlot(
+                                canvas = canvas,
+                                albumPhoto = albumPhoto,
+                                cellRect = cellRect,
+                                printTimestamp = spec.options.printTimestamp
+                            )
+                            processedPhotos += 1
+                            onProgress(
+                                PdfExportProgress(
+                                    processedPhotos = processedPhotos,
+                                    totalPhotos = spec.totalPhotos,
+                                    currentPage = pageNumber
+                                )
+                            )
+                        }
+                    } finally {
+                        pdfDocument.finishPage(page)
+                    }
                 }
             }
 
@@ -174,7 +412,8 @@ object PdfExporter {
                 contentUri = contentUri,
                 fileName = spec.suggestedFileName,
                 savedLocationNote = savedNote,
-                pageCount = 1 + maxOf(1, spec.pages.size)
+                pageCount = pageNumber,
+                photoCount = spec.totalPhotos
             )
         } finally {
             pdfDocument.close()
@@ -189,478 +428,273 @@ object PdfExporter {
         } ?: throw IllegalStateException("Tidak dapat menulis file ke lokasi tujuan.")
     }
 
-    private fun drawCoverPage(pdfDocument: PdfDocument, spec: PdfExportSpec) {
-        val pageInfo = PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, 1).create()
-        val page = pdfDocument.startPage(pageInfo)
-        val canvas = page.canvas
-
-        val bgPaint = Paint().apply { color = Color.WHITE }
-        canvas.drawRect(0f, 0f, PAGE_WIDTH.toFloat(), PAGE_HEIGHT.toFloat(), bgPaint)
-
-        val accentPaint = Paint().apply { color = Color.parseColor("#0284C7") }
-        canvas.drawRect(0f, 0f, PAGE_WIDTH.toFloat(), 16f, accentPaint)
-
-        val heroBoxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#F0F9FF")
-        }
-        val heroRect = RectF(MARGIN_H, 68f, PAGE_WIDTH - MARGIN_H, 420f)
-        canvas.drawRoundRect(heroRect, 20f, 20f, heroBoxPaint)
-
-        val heroBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#BAE6FD")
-            style = Paint.Style.STROKE
-            strokeWidth = 1.5f
-        }
-        canvas.drawRoundRect(heroRect, 20f, 20f, heroBorderPaint)
-
-        val eyebrowPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0369A1")
-            textSize = 11f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            letterSpacing = 0.08f
-        }
-        canvas.drawText("TRIPBUDDY • KENANGAN PERJALANAN", MARGIN_H + 24f, 114f, eyebrowPaint)
-
-        val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0F172A")
-            textSize = 28f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        val titleLayout = StaticLayout.Builder.obtain(
-            spec.coverTitle,
-            0,
-            spec.coverTitle.length,
-            titlePaint,
-            (CONTENT_WIDTH - 48f).toInt()
-        )
-            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-            .setLineSpacing(4f, 1.0f)
-            .setMaxLines(4)
-            .setEllipsize(TextUtils.TruncateAt.END)
-            .build()
-
-        canvas.save()
-        canvas.translate(MARGIN_H + 24f, 140f)
-        titleLayout.draw(canvas)
-        canvas.restore()
-
-        val dateY = 140f + titleLayout.height + 22f
-        val datePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0284C7")
-            textSize = 15f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        val dateLayout = StaticLayout.Builder.obtain(
-            spec.coverDateLabel,
-            0,
-            spec.coverDateLabel.length,
-            datePaint,
-            (CONTENT_WIDTH - 48f).toInt()
-        )
-            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-            .setMaxLines(2)
-            .build()
-
-        canvas.save()
-        canvas.translate(MARGIN_H + 24f, dateY)
-        dateLayout.draw(canvas)
-        canvas.restore()
-
-        val subtitleY = dateY + dateLayout.height + 12f
-        val subtitlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#475569")
-            textSize = 12f
-        }
-        canvas.drawText(spec.coverSubtitle, MARGIN_H + 24f, subtitleY + 12f, subtitlePaint)
-
-        val statsText = buildString {
-            append("${spec.pages.size} Kunjungan")
-            append(" • ${spec.totalPhotos} Foto")
-            if (spec.totalVideos > 0) {
-                append(" • ${spec.totalVideos} Video")
-            }
-        }
-        val pillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#E0F2FE")
-        }
-        val pillRect = RectF(MARGIN_H + 24f, 354f, PAGE_WIDTH - MARGIN_H - 24f, 396f)
-        canvas.drawRoundRect(pillRect, 12f, 12f, pillPaint)
-
-        val statsPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0369A1")
-            textSize = 12.5f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        canvas.drawText(statsText, MARGIN_H + 40f, 380f, statsPaint)
-
-        // Itinerary index summary on cover page
-        if (spec.pages.isNotEmpty()) {
-            val listHeadingPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#0F172A")
-                textSize = 13f
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            }
-            canvas.drawText("Daftar Kunjungan", MARGIN_H, 464f, listHeadingPaint)
-
-            val itemPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#334155")
-                textSize = 11f
-            }
-            var y = 488f
-            val maxPreview = 11
-            spec.pages.take(maxPreview).forEachIndexed { idx, item ->
-                val line = "${idx + 1}. ${item.locationName} (${DateUtils.formatIndonesianShortDate(item.dateEpochDay)} • ${DateUtils.formatTime(item.visitHour, item.visitMinute)} WIB)"
-                val ellipsized = TextUtils.ellipsize(line, itemPaint, CONTENT_WIDTH, TextUtils.TruncateAt.END).toString()
-                canvas.drawText(ellipsized, MARGIN_H, y, itemPaint)
-                y += 24f
-            }
-            if (spec.pages.size > maxPreview) {
-                val morePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = Color.parseColor("#64748B")
-                    textSize = 10.5f
-                    typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
-                }
-                canvas.drawText("...dan ${spec.pages.size - maxPreview} kunjungan lainnya", MARGIN_H, y, morePaint)
-            }
-        }
-
-        val footerPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#94A3B8")
-            textSize = 10f
-        }
-        canvas.drawText("Dibuat dengan TripBuddy", MARGIN_H, PAGE_HEIGHT - 32f, footerPaint)
-
-        pdfDocument.finishPage(page)
-    }
-
-    private fun drawEmptyGroupNoticePage(pdfDocument: PdfDocument, groupTitle: String) {
-        val pageInfo = PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, 2).create()
-        val page = pdfDocument.startPage(pageInfo)
-        val canvas = page.canvas
-
-        canvas.drawColor(Color.WHITE)
-        val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#475569")
-            textSize = 13f
-        }
-        canvas.drawText(
-            "Belum ada lokasi kunjungan di \"$groupTitle\".",
-            MARGIN_H,
-            120f,
-            textPaint
-        )
-        pdfDocument.finishPage(page)
-    }
-
-    private fun drawVisitPage(
-        context: Context,
+    private fun drawMinimalCoverPage(
         pdfDocument: PdfDocument,
         pageNumber: Int,
-        visitIndex: Int,
-        totalVisits: Int,
-        visitPage: PdfVisitPage
+        metrics: PdfGridMetrics,
+        spec: PdfPhotoAlbumSpec
     ) {
-        val pageInfo = PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNumber).create()
+        val pageInfo = PdfDocument.PageInfo.Builder(
+            metrics.pageWidthPt,
+            metrics.pageHeightPt,
+            pageNumber
+        ).create()
         val page = pdfDocument.startPage(pageInfo)
-        val canvas = page.canvas
+        try {
+            val canvas = page.canvas
+            canvas.drawColor(Color.WHITE)
 
-        canvas.drawColor(Color.WHITE)
+            val contentW = (metrics.pageWidthPt - 2f * metrics.marginPt).toInt().coerceAtLeast(100)
+            val centerY = metrics.pageHeightPt * 0.44f
 
-        // Top subtle bar
-        val topStripPaint = Paint().apply { color = Color.parseColor("#0284C7") }
-        canvas.drawRect(0f, 0f, PAGE_WIDTH.toFloat(), 8f, topStripPaint)
-
-        val badgePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0284C7")
-            textSize = 10.5f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        val dateAndTime = "${DateUtils.formatIndonesianFullDate(visitPage.dateEpochDay)} • ${DateUtils.formatTime(visitPage.visitHour, visitPage.visitMinute)} WIB"
-        canvas.drawText("Kunjungan $visitIndex dari $totalVisits", MARGIN_H, 42f, badgePaint)
-
-        val datePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#64748B")
-            textSize = 10.5f
-        }
-        canvas.drawText(dateAndTime, MARGIN_H, 58f, datePaint)
-
-        val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0F172A")
-            textSize = 20f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        val titleLayout = StaticLayout.Builder.obtain(
-            visitPage.locationName,
-            0,
-            visitPage.locationName.length,
-            titlePaint,
-            CONTENT_WIDTH.toInt()
-        )
-            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-            .setLineSpacing(3f, 1.0f)
-            .setMaxLines(2)
-            .setEllipsize(TextUtils.TruncateAt.END)
-            .build()
-
-        canvas.save()
-        canvas.translate(MARGIN_H, 74f)
-        titleLayout.draw(canvas)
-        canvas.restore()
-
-        val dividerY = 74f + titleLayout.height + 12f
-        val dividerPaint = Paint().apply {
-            color = Color.parseColor("#E2E8F0")
-            strokeWidth = 1f
-        }
-        canvas.drawLine(MARGIN_H, dividerY, PAGE_WIDTH - MARGIN_H, dividerY, dividerPaint)
-
-        val mediaStartY = dividerY + 16f
-        val mediaAreaBottomY = drawVisitMediaGrid(
-            context = context,
-            canvas = canvas,
-            mediaItems = visitPage.mediaItems,
-            topY = mediaStartY
-        )
-
-        var descTopY = mediaAreaBottomY + 18f
-        if (visitPage.mediaItems.size > MAX_MEDIA_PER_PAGE) {
-            val extraCount = visitPage.mediaItems.size - MAX_MEDIA_PER_PAGE
-            val extraPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#64748B")
-                textSize = 10f
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
+            val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#0F172A")
+                textSize = 26f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             }
-            canvas.drawText("+$extraCount media lainnya tersimpan di aplikasi", MARGIN_H, descTopY, extraPaint)
-            descTopY += 18f
-        }
+            val titleLayout = StaticLayout.Builder.obtain(
+                spec.coverTitle,
+                0,
+                spec.coverTitle.length,
+                titlePaint,
+                contentW
+            )
+                .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                .setLineSpacing(4f, 1.0f)
+                .setMaxLines(3)
+                .setEllipsize(TextUtils.TruncateAt.END)
+                .build()
 
-        val descHeaderPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0F172A")
-            textSize = 12.5f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        canvas.drawText("Deskripsi Perjalanan", MARGIN_H, descTopY, descHeaderPaint)
+            val titleTop = centerY - titleLayout.height / 2f
+            canvas.save()
+            canvas.translate(metrics.marginPt, titleTop)
+            titleLayout.draw(canvas)
+            canvas.restore()
 
-        val bodyTopY = descTopY + 14f
-        val maxBodyHeight = (PAGE_HEIGHT - 54f - bodyTopY).coerceAtLeast(48f)
-        val descText = visitPage.description.ifBlank {
-            "Belum ada deskripsi perjalanan untuk kunjungan ini."
-        }
-        val descPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = if (visitPage.description.isBlank()) Color.parseColor("#64748B") else Color.parseColor("#1E293B")
-            textSize = 11.5f
-        }
-        val approxMaxLines = (maxBodyHeight / 17f).toInt().coerceAtLeast(3)
-        val descLayout = StaticLayout.Builder.obtain(
-            descText,
-            0,
-            descText.length,
-            descPaint,
-            CONTENT_WIDTH.toInt()
-        )
-            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-            .setLineSpacing(3.5f, 1.0f)
-            .setMaxLines(approxMaxLines)
-            .setEllipsize(TextUtils.TruncateAt.END)
-            .build()
-
-        canvas.save()
-        canvas.translate(MARGIN_H, bodyTopY)
-        descLayout.draw(canvas)
-        canvas.restore()
-
-        val footerPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#94A3B8")
-            textSize = 9.5f
-        }
-        canvas.drawText("TripBuddy • Halaman $pageNumber", MARGIN_H, PAGE_HEIGHT - 28f, footerPaint)
-
-        pdfDocument.finishPage(page)
-    }
-
-    private fun drawVisitMediaGrid(
-        context: Context,
-        canvas: Canvas,
-        mediaItems: List<Foto>,
-        topY: Float
-    ): Float {
-        if (mediaItems.isEmpty()) {
-            val boxRect = RectF(MARGIN_H, topY, PAGE_WIDTH - MARGIN_H, topY + 150f)
-            val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#F8FAFC") }
-            val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            val ruleY = titleTop + titleLayout.height + 16f
+            val ruleHalf = 36f
+            val rulePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.parseColor("#CBD5E1")
-                style = Paint.Style.STROKE
-                strokeWidth = 1f
+                strokeWidth = 1.5f
             }
-            canvas.drawRoundRect(boxRect, 14f, 14f, fillPaint)
-            canvas.drawRoundRect(boxRect, 14f, 14f, strokePaint)
+            canvas.drawLine(
+                metrics.pageWidthPt / 2f - ruleHalf,
+                ruleY,
+                metrics.pageWidthPt / 2f + ruleHalf,
+                ruleY,
+                rulePaint
+            )
 
-            val emptyPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            var nextY = ruleY + 24f
+            if (spec.coverDateLabel.isNotBlank()) {
+                val datePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.parseColor("#475569")
+                    textSize = 12.5f
+                    textAlign = Paint.Align.CENTER
+                }
+                canvas.drawText(spec.coverDateLabel, metrics.pageWidthPt / 2f, nextY, datePaint)
+                nextY += 18f
+            }
+
+            val countPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.parseColor("#64748B")
-                textSize = 11.5f
+                textSize = 11f
                 textAlign = Paint.Align.CENTER
             }
             canvas.drawText(
-                "Tidak ada foto atau video untuk kunjungan ini",
-                PAGE_WIDTH / 2f,
-                topY + 80f,
-                emptyPaint
+                "${spec.totalPhotos} Foto • ${spec.visitSections.size} Kunjungan",
+                metrics.pageWidthPt / 2f,
+                nextY,
+                countPaint
             )
-            return boxRect.bottom
-        }
-
-        val shown = mediaItems.take(MAX_MEDIA_PER_PAGE)
-        val gap = 10f
-        return when (shown.size) {
-            1 -> {
-                val rect = RectF(MARGIN_H, topY, PAGE_WIDTH - MARGIN_H, topY + 270f)
-                drawSingleMediaSlot(context, canvas, shown[0], rect)
-                rect.bottom
-            }
-            2 -> {
-                val cellWidth = (CONTENT_WIDTH - gap) / 2f
-                val cellHeight = 220f
-                val r1 = RectF(MARGIN_H, topY, MARGIN_H + cellWidth, topY + cellHeight)
-                val r2 = RectF(r1.right + gap, topY, PAGE_WIDTH - MARGIN_H, topY + cellHeight)
-                drawSingleMediaSlot(context, canvas, shown[0], r1)
-                drawSingleMediaSlot(context, canvas, shown[1], r2)
-                r1.bottom
-            }
-            else -> {
-                val cellWidth = (CONTENT_WIDTH - gap) / 2f
-                val cellHeight = 162f
-                val rects = listOf(
-                    RectF(MARGIN_H, topY, MARGIN_H + cellWidth, topY + cellHeight),
-                    RectF(MARGIN_H + cellWidth + gap, topY, PAGE_WIDTH - MARGIN_H, topY + cellHeight),
-                    RectF(MARGIN_H, topY + cellHeight + gap, MARGIN_H + cellWidth, topY + cellHeight * 2 + gap),
-                    RectF(MARGIN_H + cellWidth + gap, topY + cellHeight + gap, PAGE_WIDTH - MARGIN_H, topY + cellHeight * 2 + gap)
-                )
-                shown.forEachIndexed { idx, media ->
-                    drawSingleMediaSlot(context, canvas, media, rects[idx])
-                }
-                if (shown.size == 3) rects[2].bottom else rects[3].bottom
-            }
+        } finally {
+            pdfDocument.finishPage(page)
         }
     }
 
-    private fun drawSingleMediaSlot(
-        context: Context,
+    private fun drawSquarePhotoSlot(
         canvas: Canvas,
-        media: Foto,
-        rect: RectF
+        albumPhoto: PdfAlbumPhoto,
+        cellRect: RectF,
+        printTimestamp: Boolean
     ) {
-        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#E2E8F0") }
-        canvas.drawRoundRect(rect, 12f, 12f, bgPaint)
-
-        val thumbPath = PhotoStorageHelper.resolveDisplayThumbnailPath(context, media)
-        val bitmap = thumbPath?.let {
-            decodeSampledRotatedBitmap(
-                path = it,
-                reqWidth = (rect.width() * 2).toInt().coerceAtLeast(320),
-                reqHeight = (rect.height() * 2).toInt().coerceAtLeast(320)
-            )
-        }
-
+        val bitmap = decodeHighResSquareJpegBitmap(albumPhoto.foto.filePath)
         if (bitmap != null) {
             try {
-                val clipPath = Path().apply {
-                    addRoundRect(rect, 12f, 12f, Path.Direction.CW)
-                }
-                canvas.save()
-                canvas.clipPath(clipPath)
-
-                // Center-crop scale
-                val scale = maxOf(
-                    rect.width() / bitmap.width.toFloat(),
-                    rect.height() / bitmap.height.toFloat()
-                )
-                val scaledW = bitmap.width * scale
-                val scaledH = bitmap.height * scale
-                val left = rect.centerX() - scaledW / 2f
-                val top = rect.centerY() - scaledH / 2f
-                val dst = RectF(left, top, left + scaledW, top + scaledH)
                 val src = Rect(0, 0, bitmap.width, bitmap.height)
-                canvas.drawBitmap(bitmap, src, dst, Paint(Paint.FILTER_BITMAP_FLAG))
-                canvas.restore()
+                val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                canvas.drawBitmap(bitmap, src, cellRect, bitmapPaint)
             } finally {
                 bitmap.recycle()
             }
         } else {
-            val missingPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#475569")
-                textSize = 10f
-                textAlign = Paint.Align.CENTER
+            val missingPaint = Paint().apply {
+                color = Color.parseColor("#F1F5F9")
             }
-            val label = if (media.isVideo) "Thumbnail video tidak tersedia" else "Foto tidak ditemukan"
-            canvas.drawText(label, rect.centerX(), rect.centerY(), missingPaint)
+            canvas.drawRect(cellRect, missingPaint)
         }
 
-        if (media.isVideo) {
-            val badgeRect = RectF(rect.left + 8f, rect.bottom - 26f, rect.left + 98f, rect.bottom - 8f)
-            val badgeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.argb(200, 15, 23, 42)
-            }
-            canvas.drawRoundRect(badgeRect, 6f, 6f, badgeBg)
-
-            val badgeTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.WHITE
-                textSize = 8.5f
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            }
-            canvas.drawText("▶ VIDEO", badgeRect.left + 8f, badgeRect.bottom - 5.5f, badgeTextPaint)
+        if (printTimestamp) {
+            drawPhotoTimestamp(
+                canvas = canvas,
+                cellRect = cellRect,
+                timestampText = DateUtils.formatPhotoTimestamp(albumPhoto.takenAtMillis)
+            )
         }
-
-        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#CBD5E1")
-            style = Paint.Style.STROKE
-            strokeWidth = 0.8f
-        }
-        canvas.drawRoundRect(rect, 12f, 12f, borderPaint)
     }
 
-    private fun decodeSampledRotatedBitmap(
-        path: String,
-        reqWidth: Int,
-        reqHeight: Int
-    ): Bitmap? {
-        return try {
-            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(path, options)
-            if (options.outWidth <= 0 || options.outHeight <= 0) return null
+    private fun drawPhotoTimestamp(
+        canvas: Canvas,
+        cellRect: RectF,
+        timestampText: String
+    ) {
+        val textSize = (cellRect.width() * 0.035f).coerceIn(6.2f, 9.2f)
+        val pad = (cellRect.width() * 0.032f).coerceIn(5f, 9f)
+        val x = cellRect.right - pad
+        val y = cellRect.bottom - pad
 
+        val shadowPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(185, 0, 0, 0)
+            this.textSize = textSize
+            textAlign = Paint.Align.RIGHT
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        }
+        canvas.drawText(timestampText, x + 0.7f, y + 0.7f, shadowPaint)
+        canvas.drawText(timestampText, x - 0.35f, y + 0.45f, shadowPaint)
+
+        val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            this.textSize = textSize
+            textAlign = Paint.Align.RIGHT
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+            setShadowLayer(1.8f, 0.5f, 0.5f, Color.argb(190, 0, 0, 0))
+        }
+        canvas.drawText(timestampText, x, y, textPaint)
+    }
+
+    /**
+     * Decodes original photo at high resolution, centers-crops 1:1 without distortion,
+     * scales between [MIN_SQUARE_PX] (1200 px) and [MAX_SQUARE_PX] (2000 px) per side,
+     * compresses to JPEG quality 90, and immediately recycles intermediate bitmaps.
+     */
+    private fun decodeHighResSquareJpegBitmap(path: String): Bitmap? {
+        val file = File(path)
+        if (!file.exists() || file.length() == 0L) return null
+
+        var raw: Bitmap? = null
+        var square: Bitmap? = null
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(path, bounds)
+            val origW = bounds.outWidth
+            val origH = bounds.outHeight
+            if (origW <= 0 || origH <= 0) return null
+
+            val minOrig = minOf(origW, origH)
+            val maxOrig = maxOf(origW, origH)
             var inSampleSize = 1
-            val halfH = options.outHeight / 2
-            val halfW = options.outWidth / 2
-            while ((halfH / inSampleSize) >= reqHeight && (halfW / inSampleSize) >= reqWidth) {
+            while ((minOrig / (inSampleSize * 2)) >= MIN_SQUARE_PX) {
+                inSampleSize *= 2
+            }
+            if ((maxOrig / inSampleSize) > 4500 && (minOrig / (inSampleSize * 2)) >= MIN_SQUARE_PX) {
                 inSampleSize *= 2
             }
 
             val decodeOpts = BitmapFactory.Options().apply {
                 this.inSampleSize = inSampleSize
-                this.inPreferredConfig = Bitmap.Config.RGB_565
+                this.inPreferredConfig = Bitmap.Config.ARGB_8888
             }
-            val raw = BitmapFactory.decodeFile(path, decodeOpts) ?: return null
+            raw = BitmapFactory.decodeFile(path, decodeOpts) ?: return null
 
-            val rotationDegrees = try {
-                val exif = ExifInterface(path)
-                when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
-                    ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-                    ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-                    ExifInterface.ORIENTATION_ROTATE_270 -> 270f
-                    else -> 0f
-                }
+            val exifOrientation = try {
+                ExifInterface(path).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL
+                )
             } catch (_: Exception) {
-                0f
+                ExifInterface.ORIENTATION_NORMAL
             }
 
-            if (rotationDegrees == 0f) {
-                raw
-            } else {
-                val matrix = Matrix().apply { postRotate(rotationDegrees) }
-                Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, matrix, true).also { rotated ->
-                    if (rotated !== raw) raw.recycle()
+            val cropSide = minOf(raw.width, raw.height).coerceAtLeast(1)
+            val cropX = ((raw.width - cropSide) / 2).coerceAtLeast(0)
+            val cropY = ((raw.height - cropSide) / 2).coerceAtLeast(0)
+            val targetSide = cropSide.coerceIn(MIN_SQUARE_PX, MAX_SQUARE_PX)
+            val scale = targetSide.toFloat() / cropSide.toFloat()
+
+            val matrix = exifMatrixForOrientation(exifOrientation).apply {
+                postScale(scale, scale)
+            }
+
+            square = Bitmap.createBitmap(raw, cropX, cropY, cropSide, cropSide, matrix, true)
+            if (square !== raw) {
+                raw.recycle()
+                raw = null
+            }
+
+            val jpegStream = ByteArrayOutputStream()
+            square.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, jpegStream)
+            val jpegBytes = jpegStream.toByteArray()
+            square.recycle()
+            square = null
+
+            val finalOpts = BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, finalOpts)
+        } catch (_: Exception) {
+            null
+        } catch (_: OutOfMemoryError) {
+            null
+        } finally {
+            if (square != null && !square.isRecycled) {
+                square.recycle()
+            }
+            if (raw != null && !raw.isRecycled) {
+                raw.recycle()
+            }
+        }
+    }
+
+    private fun exifMatrixForOrientation(orientation: Int): Matrix {
+        return Matrix().apply {
+            when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> postRotate(90f)
+                ExifInterface.ORIENTATION_ROTATE_180 -> postRotate(180f)
+                ExifInterface.ORIENTATION_ROTATE_270 -> postRotate(270f)
+                ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> postScale(-1f, 1f)
+                ExifInterface.ORIENTATION_FLIP_VERTICAL -> postScale(1f, -1f)
+                ExifInterface.ORIENTATION_TRANSPOSE -> {
+                    postRotate(90f)
+                    postScale(-1f, 1f)
+                }
+                ExifInterface.ORIENTATION_TRANSVERSE -> {
+                    postRotate(270f)
+                    postScale(-1f, 1f)
                 }
             }
+        }
+    }
+
+    fun resolvePhotoTakenMillis(foto: Foto): Long {
+        val file = File(foto.filePath)
+        if (file.exists() && file.length() > 0L) {
+            val exifMillis = readExifDateTimeMillis(file.absolutePath)
+            if (exifMillis != null && exifMillis > 0L) return exifMillis
+        }
+        if (foto.createdAtMillis > 0L) return foto.createdAtMillis
+        val lastMod = if (file.exists()) file.lastModified() else 0L
+        return if (lastMod > 0L) lastMod else System.currentTimeMillis()
+    }
+
+    private fun readExifDateTimeMillis(path: String): Long? {
+        return try {
+            val exif = ExifInterface(path)
+            val rawDate = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
+                ?: exif.getAttribute(ExifInterface.TAG_DATETIME_DIGITIZED)
+                ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
+                ?: return null
+            val parser = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US)
+            parser.parse(rawDate.trim())?.time
         } catch (_: Exception) {
             null
         }

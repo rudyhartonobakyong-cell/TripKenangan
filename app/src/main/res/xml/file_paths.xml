@@ -12,4 +12,7 @@
     <cache-path
         name="pdf_exports"
         path="pdf_exports/" />
+    <cache-path
+        name="backups"
+        path="backups/" />
 </paths>

@@ -46,7 +46,7 @@ fun PdfExportReadyDialog(
         },
         title = {
             Text(
-                text = "PDF Kenangan Siap",
+                text = "Album Foto PDF Siap",
                 style = MaterialTheme.typography.titleLarge
             )
         },
@@ -68,7 +68,7 @@ fun PdfExportReadyDialog(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "${result.pageCount} halaman (1 sampul + ${result.pageCount - 1} kunjungan)",
+                            text = "${result.pageCount} halaman • ${result.photoCount} foto",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary
                         )

@@ -75,6 +75,7 @@ import com.example.collab.SharedTrip
 import com.example.notifications.ReminderTimingOption
 import com.example.notifications.UserReminderSettings
 import com.example.ui.theme.AppThemeOption
+import com.example.util.BackupEstimate
 
 @Composable
 fun CreateSharedTripDialog(
@@ -387,6 +388,13 @@ fun AccountProfileSheet(
     onRequestNotificationPermission: () -> Unit,
     onRequestExactAlarmPermission: () -> Unit,
     onOpenBatteryAppInfo: () -> Unit,
+    backupIncludeVideos: Boolean,
+    backupEstimate: BackupEstimate?,
+    isEstimatingBackup: Boolean,
+    isBackupBusy: Boolean,
+    onToggleBackupIncludeVideos: (Boolean) -> Unit,
+    onExportBackupClick: () -> Unit,
+    onImportBackupClick: () -> Unit,
     projectId: String,
     databaseId: String,
     isTestingFirestore: Boolean,
@@ -490,6 +498,16 @@ fun AccountProfileSheet(
                 onRequestNotificationPermission = onRequestNotificationPermission,
                 onRequestExactAlarmPermission = onRequestExactAlarmPermission,
                 onOpenBatteryAppInfo = onOpenBatteryAppInfo
+            )
+
+            BackupAndRestoreSection(
+                includeVideos = backupIncludeVideos,
+                estimate = backupEstimate,
+                isEstimating = isEstimatingBackup,
+                isBusy = isBackupBusy,
+                onToggleIncludeVideos = onToggleBackupIncludeVideos,
+                onExportClick = onExportBackupClick,
+                onImportClick = onImportBackupClick
             )
 
             Surface(

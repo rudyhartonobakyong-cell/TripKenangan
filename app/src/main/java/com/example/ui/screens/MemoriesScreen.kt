@@ -85,6 +85,7 @@ fun MemoriesScreen(
     onSelectMemoryGroup: (String?) -> Unit,
     onVisitMemoryClick: (String) -> Unit,
     onExportGroupPdf: (GroupMemorySummary) -> Unit = {},
+    onExportPdf: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val isInsideGroupDetail = uiState.selectedMemoriesTab == MemoriesFilterTab.GRUP &&
@@ -238,6 +239,26 @@ fun MemoriesScreen(
                         onBackToGroupList = { onSelectMemoryGroup(null) },
                         onExportGroupPdf = { onExportGroupPdf(activeSummary) }
                     )
+                }
+            } else {
+                item {
+                    OutlinedButton(
+                        onClick = onExportPdf,
+                        enabled = !uiState.isExportingPdf,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("memories_export_pdf_button"),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PictureAsPdf,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Ekspor Album Foto PDF")
+                    }
                 }
             }
 

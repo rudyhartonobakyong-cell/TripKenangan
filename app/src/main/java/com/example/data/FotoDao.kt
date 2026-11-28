@@ -11,6 +11,9 @@ interface FotoDao {
     @Query("SELECT * FROM foto ORDER BY createdAtMillis ASC")
     fun observeAllFotos(): Flow<List<Foto>>
 
+    @Query("SELECT * FROM foto ORDER BY createdAtMillis ASC")
+    suspend fun getAllFotosOnce(): List<Foto>
+
     @Query("SELECT * FROM foto WHERE kunjunganId = :kunjunganId ORDER BY createdAtMillis ASC")
     fun observeFotosForKunjungan(kunjunganId: String): Flow<List<Foto>>
 
@@ -22,6 +25,9 @@ interface FotoDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFoto(foto: Foto)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertFotosIgnore(fotos: List<Foto>)
 
     @Query("DELETE FROM foto WHERE id = :id")
     suspend fun deleteFotoById(id: String)
