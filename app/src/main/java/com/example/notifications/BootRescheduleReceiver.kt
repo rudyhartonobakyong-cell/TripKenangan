@@ -24,9 +24,15 @@ class BootRescheduleReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 TripNotificationHelper.createNotificationChannel(appContext)
-                val dao = TripBuddyDatabase.getInstance(appContext).kunjunganDao()
-                val pendingVisits = dao.getPendingKunjunganOnce()
-                TripAlarmScheduler(appContext).rescheduleAllUpcomingReminders(pendingVisits)
+                val db = TripBuddyDatabase.getInstance(appContext)
+                val tripsById = db.tripDao().getAllTripsOnce().associateBy { it.id }
+                val allVisits = db.kunjunganDao().getAllKunjunganOnce()
+                val settings = ReminderPreferences.loadActiveUserSettings(appContext)
+                TripAlarmScheduler(appContext).rescheduleAllReminders(
+                    visits = allVisits,
+                    tripsById = tripsById,
+                    settings = settings
+                )
             } finally {
                 pendingResult.finish()
             }

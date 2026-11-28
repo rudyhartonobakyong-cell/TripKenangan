@@ -39,6 +39,10 @@ class TripRepository(
 
     suspend fun getPendingKunjunganOnce(): List<Kunjungan> = kunjunganDao.getPendingKunjunganOnce()
 
+    suspend fun getAllTripsOnce(): List<Trip> = tripDao.getAllTripsOnce()
+
+    suspend fun getAllKunjunganOnce(): List<Kunjungan> = kunjunganDao.getAllKunjunganOnce()
+
     suspend fun upsertKunjungan(kunjungan: Kunjungan) {
         ensurePersonalTripExists()
         kunjunganDao.upsertKunjungan(kunjungan)
@@ -48,10 +52,10 @@ class TripRepository(
         kunjunganDao.updateMemoryNotes(kunjunganId, memoryNotes)
     }
 
-    suspend fun deleteKunjunganById(kunjunganId: String) {
+    suspend fun deleteKunjunganById(kunjunganId: String, filesDir: File? = null) {
         val photos = fotoDao.getFotosForKunjunganOnce(kunjunganId)
         kunjunganDao.deleteKunjunganById(kunjunganId)
-        photos.forEach { PhotoStorageHelper.deleteFileQuietly(it.filePath) }
+        photos.forEach { PhotoStorageHelper.deleteMediaAndThumbnail(it, filesDir) }
     }
 
     suspend fun syncSharedTripsToRoom(sharedTrips: List<SharedTrip>) {
@@ -85,9 +89,23 @@ class TripRepository(
     suspend fun syncSharedVisitsToRoom(
         sharedTrip: SharedTrip,
         remoteVisits: List<SharedVisit>
-    ) {
+    ): List<String> {
         syncSharedTripToRoom(sharedTrip)
         val tripUuid = Trip.sharedTripUuid(sharedTrip.id)
+        val existingForTrip = kunjunganDao.getKunjunganForTripOnce(tripUuid)
+        val remoteIds = remoteVisits.map { it.id }.toSet()
+
+        val removedVisitIds = mutableListOf<String>()
+        existingForTrip.forEach { existing ->
+            val remoteId = existing.remoteDocId
+            if (!remoteId.isNullOrBlank() && remoteId !in remoteIds) {
+                removedVisitIds.add(existing.id)
+                if (fotoDao.getFotosForKunjunganOnce(existing.id).isEmpty()) {
+                    kunjunganDao.deleteKunjunganById(existing.id)
+                }
+            }
+        }
+
         val mapped = remoteVisits.map { remote ->
             val visitUuid = Kunjungan.sharedVisitUuid(sharedTrip.id, remote.id)
             val existing = kunjunganDao.getKunjunganByIdOnce(visitUuid)
@@ -114,6 +132,7 @@ class TripRepository(
         if (mapped.isNotEmpty()) {
             kunjunganDao.upsertKunjunganList(mapped)
         }
+        return removedVisitIds
     }
 
     suspend fun saveCapturedPhotoForKunjungan(
@@ -136,17 +155,46 @@ class TripRepository(
                 tripId = kunjungan.tripId,
                 filePath = persisted.privateFilePath,
                 mediaStoreUri = persisted.mediaStoreUri,
-                createdAtMillis = System.currentTimeMillis()
+                createdAtMillis = System.currentTimeMillis(),
+                mediaType = Foto.MEDIA_TYPE_PHOTO
             )
             fotoDao.insertFoto(foto)
             foto
         }
     }
 
-    suspend fun deleteFoto(foto: Foto) {
+    suspend fun saveCapturedVideoForKunjungan(
+        context: Context,
+        tempVideoFile: File,
+        kunjunganId: String
+    ): Result<Foto> = withContext(Dispatchers.IO) {
+        runCatching {
+            val kunjungan = kunjunganDao.getKunjunganByIdOnce(kunjunganId)
+                ?: throw IllegalStateException("Kunjungan tidak ditemukan di database lokal.")
+            val persisted = PhotoStorageHelper.persistCapturedVideo(
+                context = context,
+                tempFile = tempVideoFile,
+                tripId = kunjungan.tripId,
+                kunjunganId = kunjungan.id
+            )
+            val video = Foto(
+                id = persisted.photoUuid,
+                kunjunganId = kunjungan.id,
+                tripId = kunjungan.tripId,
+                filePath = persisted.privateFilePath,
+                mediaStoreUri = persisted.mediaStoreUri,
+                createdAtMillis = System.currentTimeMillis(),
+                mediaType = Foto.MEDIA_TYPE_VIDEO
+            )
+            fotoDao.insertFoto(video)
+            video
+        }
+    }
+
+    suspend fun deleteFoto(foto: Foto, filesDir: File? = null) {
         fotoDao.deleteFotoById(foto.id)
         withContext(Dispatchers.IO) {
-            PhotoStorageHelper.deleteFileQuietly(foto.filePath)
+            PhotoStorageHelper.deleteMediaAndThumbnail(foto, filesDir)
         }
     }
 

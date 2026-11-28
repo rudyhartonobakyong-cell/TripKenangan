@@ -27,5 +27,14 @@ data class Foto(
     val tripId: String,
     val filePath: String,
     val mediaStoreUri: String? = null,
-    val createdAtMillis: Long = System.currentTimeMillis()
-)
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val mediaType: String = MEDIA_TYPE_PHOTO
+) {
+    val isVideo: Boolean
+        get() = mediaType == MEDIA_TYPE_VIDEO
+
+    companion object {
+        const val MEDIA_TYPE_PHOTO = "PHOTO"
+        const val MEDIA_TYPE_VIDEO = "VIDEO"
+    }
+}

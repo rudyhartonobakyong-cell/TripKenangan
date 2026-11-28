@@ -16,6 +16,7 @@ import com.example.R
 
 object TripNotificationHelper {
     const val CHANNEL_ID = "trip_reminders_channel"
+    const val EXTRA_OPEN_KUNJUNGAN_ID = "extra_open_kunjungan_id"
 
     fun createNotificationChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -45,16 +46,23 @@ object TripNotificationHelper {
     fun showTripReminderNotification(
         context: Context,
         notificationId: Int,
-        locationName: String,
-        tripTitle: String,
-        timeLabel: String,
-        isTest: Boolean
+        targetKunjunganId: String?,
+        title: String,
+        bodyText: String
     ) {
         createNotificationChannel(context)
         if (!hasNotificationPermission(context)) return
 
         val openAppIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            action = if (!targetKunjunganId.isNullOrBlank()) {
+                "com.example.OPEN_VISIT_$targetKunjunganId"
+            } else {
+                Intent.ACTION_MAIN
+            }
+            if (!targetKunjunganId.isNullOrBlank()) {
+                putExtra(EXTRA_OPEN_KUNJUNGAN_ID, targetKunjunganId)
+            }
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
         val contentPendingIntent = PendingIntent.getActivity(
             context,
@@ -62,20 +70,6 @@ object TripNotificationHelper {
             openAppIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-
-        val title = if (isTest) {
-            "Tes Notifikasi TripBuddy"
-        } else if (tripTitle.isNotBlank()) {
-            "Pengingat Trip: $tripTitle"
-        } else {
-            "Waktunya Berkunjung!"
-        }
-
-        val bodyText = if (isTest) {
-            "Notifikasi pengingat perjalanan berfungsi dengan baik. Lokasi contoh: $locationName"
-        } else {
-            "Jadwal kunjungan ke $locationName pukul $timeLabel WIB."
-        }
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification_trip)

@@ -1,16 +1,19 @@
 package com.example
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.layout.Box
@@ -31,6 +34,8 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -46,7 +51,9 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -62,11 +69,15 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.auth.authStateFlow
 import com.example.auth.signOutFromGoogle
 import com.example.collab.CollabRepository
+import com.example.data.Trip
 import com.example.data.TripBuddyDatabase
 import com.example.data.TripRepository
 import com.example.notifications.TripAlarmScheduler
@@ -77,12 +88,14 @@ import com.example.ui.TripBuddyViewModel
 import com.example.ui.TripTab
 import com.example.ui.components.AccountProfileSheet
 import com.example.ui.components.AddLocationSheet
+import com.example.ui.components.CameraCaptureModeDialog
 import com.example.ui.components.CameraVisitPickerDialog
 import com.example.ui.components.CollabWorkspaceBar
 import com.example.ui.components.CreateSharedTripDialog
 import com.example.ui.components.InviteMemberSheet
 import com.example.ui.components.JoinTripByCodeDialog
 import com.example.ui.components.MapsSearchSheet
+import com.example.ui.components.PdfExportReadyDialog
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.CalendarScreen
 import com.example.ui.screens.GroupDirectoryScreen
@@ -93,15 +106,19 @@ import com.example.ui.screens.VisitMemoryDetailScreen
 import com.example.ui.theme.AppThemeOption
 import com.example.ui.theme.ThemePreferences
 import com.example.ui.theme.TripBuddyTheme
+import com.example.util.PdfExporter
 import com.example.util.PhotoStorageHelper
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 class MainActivity : ComponentActivity() {
 
     private var deepLinkInviteCode by mutableStateOf<String?>(null)
+    private var deepLinkVisitId by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -109,6 +126,7 @@ class MainActivity : ComponentActivity() {
 
         TripNotificationHelper.createNotificationChannel(applicationContext)
         deepLinkInviteCode = extractInviteCodeFromIntent(intent)
+        deepLinkVisitId = extractVisitIdFromIntent(intent)
 
         val database = TripBuddyDatabase.getInstance(applicationContext)
         val localRepository = TripRepository(
@@ -158,6 +176,14 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
+                        LaunchedEffect(deepLinkVisitId) {
+                            val visitId = deepLinkVisitId
+                            if (!visitId.isNullOrBlank()) {
+                                viewModel.openVisitMemoryDetail(visitId)
+                                deepLinkVisitId = null
+                            }
+                        }
+
                         TripBuddyApp(
                             viewModel = viewModel,
                             selectedTheme = selectedTheme,
@@ -178,11 +204,19 @@ class MainActivity : ComponentActivity() {
         extractInviteCodeFromIntent(intent)?.let { code ->
             deepLinkInviteCode = code
         }
+        extractVisitIdFromIntent(intent)?.let { visitId ->
+            deepLinkVisitId = visitId
+        }
     }
 
     private fun extractInviteCodeFromIntent(intent: Intent?): String? {
         val dataString = intent?.dataString ?: return null
         return CollabRepository.extractInviteCode(dataString)
+    }
+
+    private fun extractVisitIdFromIntent(intent: Intent?): String? {
+        return intent?.getStringExtra(TripNotificationHelper.EXTRA_OPEN_KUNJUNGAN_ID)
+            ?.takeIf { it.isNotBlank() }
     }
 }
 
@@ -194,6 +228,23 @@ private data class NavTabItem(
     val testTag: String
 )
 
+private class CaptureVideoWithLimitContract(
+    private val maxDurationSeconds: Int = 60
+) : ActivityResultContract<Uri, Boolean>() {
+    override fun createIntent(context: Context, input: Uri): Intent {
+        return Intent(MediaStore.ACTION_VIDEO_CAPTURE).apply {
+            putExtra(MediaStore.EXTRA_OUTPUT, input)
+            putExtra(MediaStore.EXTRA_DURATION_LIMIT, maxDurationSeconds)
+            putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 1)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+    }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): Boolean {
+        return resultCode == Activity.RESULT_OK
+    }
+}
+
 @Composable
 fun TripBuddyApp(
     viewModel: TripBuddyViewModel,
@@ -201,15 +252,39 @@ fun TripBuddyApp(
     onSelectTheme: (AppThemeOption) -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
     var pendingTestAfterPermission by remember { mutableStateOf(false) }
 
+    val alarmScheduler = remember(context) { TripAlarmScheduler(context.applicationContext) }
+    var hasNotificationPermission by remember {
+        mutableStateOf(TripNotificationHelper.hasNotificationPermission(context))
+    }
+    var canScheduleExactAlarms by remember {
+        mutableStateOf(alarmScheduler.canScheduleExactAlarms())
+    }
+    var showNotificationRationaleDialog by remember { mutableStateOf(false) }
+    var showExactAlarmRationaleDialog by remember { mutableStateOf(false) }
+
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasNotificationPermission = TripNotificationHelper.hasNotificationPermission(context)
+                canScheduleExactAlarms = alarmScheduler.canScheduleExactAlarms()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     // Survive Activity recreation while the external camera app is open
+    var pendingCameraModeVisit by remember { mutableStateOf<DisplayVisit?>(null) }
     var pendingCameraVisitId by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingTempCapturePath by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingTempVideoPath by rememberSaveable { mutableStateOf<String?>(null) }
 
     val showMessage: (String) -> Unit = { msg ->
         coroutineScope.launch {
@@ -237,6 +312,26 @@ fun TripBuddyApp(
         }
     }
 
+    val recordVideoLauncher = rememberLauncherForActivityResult(
+        contract = CaptureVideoWithLimitContract(maxDurationSeconds = 60)
+    ) { success ->
+        val visitId = pendingCameraVisitId
+        val videoPath = pendingTempVideoPath
+        pendingCameraVisitId = null
+        pendingTempVideoPath = null
+
+        val videoFile = videoPath?.let { File(it) }
+        if (success && !visitId.isNullOrBlank() && videoFile != null && videoFile.exists() && videoFile.length() > 0L) {
+            viewModel.saveCapturedVideo(
+                context = context,
+                kunjunganId = visitId,
+                tempVideoFile = videoFile
+            )
+        } else {
+            PhotoStorageHelper.deleteFileQuietly(videoPath)
+        }
+    }
+
     val launchCameraForVisitId: (String) -> Unit = { visitId ->
         try {
             val tempFile = PhotoStorageHelper.createTempCaptureFile(context)
@@ -248,6 +343,20 @@ fun TripBuddyApp(
             pendingCameraVisitId = null
             pendingTempCapturePath = null
             showMessage("Kamera tidak dapat dibuka: ${e.localizedMessage ?: "periksa aplikasi kamera"}")
+        }
+    }
+
+    val launchVideoForVisitId: (String) -> Unit = { visitId ->
+        try {
+            val tempFile = PhotoStorageHelper.createTempVideoFile(context)
+            val uri = PhotoStorageHelper.getUriForFile(context, tempFile)
+            pendingCameraVisitId = visitId
+            pendingTempVideoPath = tempFile.absolutePath
+            recordVideoLauncher.launch(uri)
+        } catch (e: Exception) {
+            pendingCameraVisitId = null
+            pendingTempVideoPath = null
+            showMessage("Perekam video tidak dapat dibuka: ${e.localizedMessage ?: "periksa aplikasi kamera"}")
         }
     }
 
@@ -263,12 +372,64 @@ fun TripBuddyApp(
         }
     }
 
-    val requestCameraForVisit: (DisplayVisit) -> Unit = { visit ->
+    val videoPermissionsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val visitId = pendingCameraVisitId
+        val cameraGranted = permissions[Manifest.permission.CAMERA] == true ||
+            PhotoStorageHelper.hasCameraPermission(context)
+        val audioGranted = permissions[Manifest.permission.RECORD_AUDIO] == true ||
+            PhotoStorageHelper.hasVideoPermissions(context)
+        if (cameraGranted && audioGranted && !visitId.isNullOrBlank()) {
+            launchVideoForVisitId(visitId)
+        } else {
+            pendingCameraVisitId = null
+            showMessage("Izin kamera dan mikrofon diperlukan untuk merekam video kenangan.")
+        }
+    }
+
+    val startPhotoCaptureForVisit: (DisplayVisit) -> Unit = { visit ->
         if (PhotoStorageHelper.hasCameraPermission(context)) {
             launchCameraForVisitId(visit.id)
         } else {
             pendingCameraVisitId = visit.id
             cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    val startVideoCaptureForVisit: (DisplayVisit) -> Unit = { visit ->
+        if (PhotoStorageHelper.hasVideoPermissions(context)) {
+            launchVideoForVisitId(visit.id)
+        } else {
+            pendingCameraVisitId = visit.id
+            videoPermissionsLauncher.launch(
+                arrayOf(
+                    Manifest.permission.CAMERA,
+                    Manifest.permission.RECORD_AUDIO
+                )
+            )
+        }
+    }
+
+    val requestCameraForVisit: (DisplayVisit) -> Unit = { visit ->
+        pendingCameraModeVisit = visit
+    }
+
+    val createPdfDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/pdf")
+    ) { destUri ->
+        val exported = uiState.exportedPdfResult ?: return@rememberLauncherForActivityResult
+        if (destUri != null) {
+            coroutineScope.launch {
+                val copyResult = withContext(Dispatchers.IO) {
+                    PdfExporter.copyFileToUri(context, exported.cacheFile, destUri)
+                }
+                copyResult.onSuccess {
+                    showMessage("PDF berhasil disimpan: ${exported.fileName}")
+                }.onFailure { err ->
+                    showMessage("Gagal menyimpan PDF: ${err.localizedMessage ?: "terjadi kesalahan"}")
+                }
+            }
         }
     }
 
@@ -313,13 +474,39 @@ fun TripBuddyApp(
         }
     }
 
+    val openExactAlarmSettings: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val settingsIntent = Intent(
+                Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                Uri.parse("package:${context.packageName}")
+            ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+            context.startActivity(settingsIntent)
+        }
+    }
+
+    val openBatteryAppInfoSettings: () -> Unit = {
+        val detailsIntent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:${context.packageName}")
+        ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        context.startActivity(detailsIntent)
+    }
+
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
+        hasNotificationPermission = granted || TripNotificationHelper.hasNotificationPermission(context)
         if (granted) {
             if (pendingTestAfterPermission) {
                 pendingTestAfterPermission = false
                 scheduleTestAndNotifyUser()
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmScheduler.canScheduleExactAlarms()) {
+                val prefs = context.getSharedPreferences("tripbuddy_prefs", Context.MODE_PRIVATE)
+                if (!prefs.getBoolean("asked_exact_alarm_rationale", false)) {
+                    prefs.edit().putBoolean("asked_exact_alarm_rationale", true).apply()
+                    showExactAlarmRationaleDialog = true
+                }
             }
         } else {
             if (pendingTestAfterPermission) {
@@ -331,13 +518,19 @@ fun TripBuddyApp(
 
     LaunchedEffect(Unit) {
         TripNotificationHelper.createNotificationChannel(context)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val prefs = context.getSharedPreferences("tripbuddy_prefs", Context.MODE_PRIVATE)
-            val alreadyRequested = prefs.getBoolean("asked_post_notifications", false)
-            if (!TripNotificationHelper.hasNotificationPermission(context) && !alreadyRequested) {
-                prefs.edit().putBoolean("asked_post_notifications", true).apply()
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
+        val prefs = context.getSharedPreferences("tripbuddy_prefs", Context.MODE_PRIVATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !TripNotificationHelper.hasNotificationPermission(context) &&
+            !prefs.getBoolean("asked_post_notifications", false)
+        ) {
+            prefs.edit().putBoolean("asked_post_notifications", true).apply()
+            showNotificationRationaleDialog = true
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            !alarmScheduler.canScheduleExactAlarms() &&
+            !prefs.getBoolean("asked_exact_alarm_rationale", false)
+        ) {
+            prefs.edit().putBoolean("asked_exact_alarm_rationale", true).apply()
+            showExactAlarmRationaleDialog = true
         }
     }
 
@@ -374,20 +567,31 @@ fun TripBuddyApp(
             members = uiState.activeTripMembers,
             currentUserId = uiState.currentUserId,
             isSubmitting = uiState.isSubmittingCollab,
+            isExportingPdf = uiState.isExportingPdf,
             onBack = viewModel::closeMembersScreen,
             onInviteClick = { viewModel.openInviteSheet(activeGroup) },
+            onExportGroupPdf = {
+                viewModel.exportGroupMemoriesPdf(
+                    context = context,
+                    tripUuid = Trip.sharedTripUuid(activeGroup.id),
+                    groupTitle = activeGroup.title
+                )
+            },
             onTransferAdmin = { newAdmin -> viewModel.transferGroupAdmin(activeGroup, newAdmin) },
             onLeaveGroup = { viewModel.leaveSharedTrip(activeGroup) },
             onDeleteGroup = { viewModel.deleteSharedTrip(activeGroup) }
         )
     } else if (uiState.activeVisitMemoryDetail != null) {
+        val detail = uiState.activeVisitMemoryDetail!!
         VisitMemoryDetailScreen(
-            detail = uiState.activeVisitMemoryDetail!!,
+            detail = detail,
+            isExportingPdf = uiState.isExportingPdf,
             onBack = viewModel::closeVisitMemoryDetail,
             onTakePhotoForVisit = requestCameraForVisit,
-            onDeletePhoto = viewModel::deleteMemoryPhoto,
+            onDeletePhoto = { media -> viewModel.deleteMemoryPhoto(media, context.filesDir) },
             onSaveMemoryNotes = { kunjungan, notes -> viewModel.saveMemoryNotes(kunjungan, notes) },
-            onOpenMapsForVisit = { visit -> viewModel.openMapsSearchSheet(visit) }
+            onOpenMapsForVisit = { visit -> viewModel.openMapsSearchSheet(visit) },
+            onExportPdf = { viewModel.exportSingleMemoryPdf(context, detail) }
         )
     } else {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -414,7 +618,7 @@ fun TripBuddyApp(
                                 contentDescription = stringResource(R.string.cd_take_photo)
                             )
                             Text(
-                                text = "Ambil Foto",
+                                text = "Kamera",
                                 modifier = Modifier.padding(start = 8.dp)
                             )
                         }
@@ -592,7 +796,15 @@ fun TripBuddyApp(
                                             onSearchQueryChange = viewModel::setMemorySearchQuery,
                                             onMemoriesTabChange = viewModel::selectMemoriesTab,
                                             onSelectMemoryGroup = viewModel::selectMemoryGroup,
-                                            onVisitMemoryClick = viewModel::openVisitMemoryDetail
+                                            onVisitMemoryClick = viewModel::openVisitMemoryDetail,
+                                            onExportGroupPdf = { summary ->
+                                                viewModel.exportGroupMemoriesPdf(
+                                                    context = context,
+                                                    tripUuid = summary.trip.id,
+                                                    groupTitle = summary.trip.name,
+                                                    fallbackDateLabel = summary.dateRangeLabel
+                                                )
+                                            }
                                         )
                                     }
                                 }
@@ -614,6 +826,38 @@ fun TripBuddyApp(
                 viewModel.selectTab(TripTab.KALENDER)
                 viewModel.openAddLocationSheet(uiState.todayEpochDay)
             }
+        )
+    }
+
+    pendingCameraModeVisit?.let { chosenVisit ->
+        CameraCaptureModeDialog(
+            visit = chosenVisit,
+            onDismiss = { pendingCameraModeVisit = null },
+            onSelectPhoto = { startPhotoCaptureForVisit(chosenVisit) },
+            onSelectVideo = { startVideoCaptureForVisit(chosenVisit) }
+        )
+    }
+
+    uiState.exportedPdfResult?.let { exported ->
+        PdfExportReadyDialog(
+            result = exported,
+            onSharePdf = {
+                try {
+                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                        type = "application/pdf"
+                        putExtra(Intent.EXTRA_STREAM, exported.contentUri)
+                        putExtra(Intent.EXTRA_SUBJECT, exported.fileName)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    context.startActivity(Intent.createChooser(shareIntent, "Bagikan PDF Kenangan"))
+                } catch (e: Exception) {
+                    showMessage("Tidak dapat membuka dialog bagikan: ${e.localizedMessage ?: "periksa aplikasi tujuan"}")
+                }
+            },
+            onSavePdfAs = {
+                createPdfDocumentLauncher.launch(exported.fileName)
+            },
+            onDismiss = viewModel::dismissExportedPdfDialog
         )
     }
 
@@ -651,6 +895,23 @@ fun TripBuddyApp(
             photoUrl = uiState.currentUserPhotoUrl,
             selectedTheme = selectedTheme,
             onSelectTheme = onSelectTheme,
+            reminderSettings = uiState.reminderSettings,
+            hasNotificationPermission = hasNotificationPermission,
+            canScheduleExactAlarms = canScheduleExactAlarms,
+            onSetRemindersEnabled = viewModel::setRemindersEnabled,
+            onToggleReminderTiming = viewModel::toggleReminderTiming,
+            onSetAnnualMemoryReminderEnabled = viewModel::setAnnualMemoryReminderEnabled,
+            onRequestNotificationPermission = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    showNotificationRationaleDialog = true
+                }
+            },
+            onRequestExactAlarmPermission = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    showExactAlarmRationaleDialog = true
+                }
+            },
+            onOpenBatteryAppInfo = openBatteryAppInfoSettings,
             projectId = uiState.activeProjectId,
             databaseId = uiState.activeDatabaseId,
             isTestingFirestore = uiState.isTestingFirestore,
@@ -664,6 +925,62 @@ fun TripBuddyApp(
                     credentialManager = credentialManager,
                     scope = coroutineScope
                 )
+            }
+        )
+    }
+
+    if (showNotificationRationaleDialog && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        AlertDialog(
+            onDismissRequest = { showNotificationRationaleDialog = false },
+            title = { Text("Izinkan Notifikasi Pengingat") },
+            text = {
+                Text(
+                    "TripBuddy membutuhkan izin notifikasi agar dapat mengingatkan Anda H-1 jam 09.00, menjelang jam kunjungan, serta pengingat kenangan setiap tahun."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showNotificationRationaleDialog = false
+                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    },
+                    modifier = Modifier.testTag("confirm_notification_rationale_button")
+                ) {
+                    Text("Izinkan")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNotificationRationaleDialog = false }) {
+                    Text("Nanti")
+                }
+            }
+        )
+    }
+
+    if (showExactAlarmRationaleDialog && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        AlertDialog(
+            onDismissRequest = { showExactAlarmRationaleDialog = false },
+            title = { Text("Izinkan Alarm Tepat Waktu") },
+            text = {
+                Text(
+                    "Izin Alarm & Pengingat memastikan notifikasi H-1 pukul 09.00 dan pengingat sebelum kunjungan muncul tepat waktu meskipun HP sedang idle."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showExactAlarmRationaleDialog = false
+                        openExactAlarmSettings()
+                    },
+                    modifier = Modifier.testTag("confirm_exact_alarm_rationale_button")
+                ) {
+                    Text("Buka Pengaturan")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExactAlarmRationaleDialog = false }) {
+                    Text("Nanti")
+                }
             }
         )
     }

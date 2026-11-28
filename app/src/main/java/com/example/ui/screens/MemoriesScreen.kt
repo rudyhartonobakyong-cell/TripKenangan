@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -30,9 +31,13 @@ import androidx.compose.material.icons.rounded.DateRange
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.PictureAsPdf
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -46,10 +51,13 @@ import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -65,6 +73,7 @@ import com.example.ui.TripBuddyUiState
 import com.example.ui.VisitMemoryItem
 import com.example.ui.components.MemoryPhotoPlaceholder
 import com.example.util.DateUtils
+import com.example.util.PhotoStorageHelper
 import java.io.File
 
 @Composable
@@ -75,6 +84,7 @@ fun MemoriesScreen(
     onMemoriesTabChange: (MemoriesFilterTab) -> Unit,
     onSelectMemoryGroup: (String?) -> Unit,
     onVisitMemoryClick: (String) -> Unit,
+    onExportGroupPdf: (GroupMemorySummary) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val isInsideGroupDetail = uiState.selectedMemoriesTab == MemoriesFilterTab.GRUP &&
@@ -220,10 +230,13 @@ fun MemoriesScreen(
             }
 
             if (isInsideGroupDetail && uiState.selectedMemoryGroupSummary != null) {
+                val activeSummary = uiState.selectedMemoryGroupSummary
                 item {
                     SelectedGroupMemoriesHeader(
-                        summary = uiState.selectedMemoryGroupSummary,
-                        onBackToGroupList = { onSelectMemoryGroup(null) }
+                        summary = activeSummary,
+                        isExportingPdf = uiState.isExportingPdf,
+                        onBackToGroupList = { onSelectMemoryGroup(null) },
+                        onExportGroupPdf = { onExportGroupPdf(activeSummary) }
                     )
                 }
             }
@@ -357,10 +370,20 @@ fun MemoriesScreen(
     }
 }
 
+private fun formatMediaCountLabel(photoCount: Int, videoCount: Int): String {
+    return when {
+        photoCount > 0 && videoCount > 0 -> "$photoCount foto • $videoCount video"
+        videoCount > 0 -> "$videoCount video"
+        else -> "$photoCount foto"
+    }
+}
+
 @Composable
 private fun SelectedGroupMemoriesHeader(
     summary: GroupMemorySummary,
-    onBackToGroupList: () -> Unit
+    isExportingPdf: Boolean,
+    onBackToGroupList: () -> Unit,
+    onExportGroupPdf: () -> Unit
 ) {
     Surface(
         shape = RoundedCornerShape(18.dp),
@@ -419,10 +442,36 @@ private fun SelectedGroupMemoriesHeader(
                 color = MaterialTheme.colorScheme.onTertiaryContainer
             )
             Text(
-                text = "${summary.dateRangeLabel} • ${summary.photoCount} foto",
+                text = "${summary.dateRangeLabel} • ${formatMediaCountLabel(summary.photoCount, summary.videoCount)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onTertiaryContainer
             )
+
+            Button(
+                onClick = onExportGroupPdf,
+                enabled = !isExportingPdf,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("memories_group_export_pdf_button"),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                if (isExportingPdf) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Rounded.PictureAsPdf,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Ekspor PDF")
+                }
+            }
         }
     }
 }
@@ -432,6 +481,12 @@ private fun GroupMemoryFolderCard(
     summary: GroupMemorySummary,
     onClick: () -> Unit
 ) {
+    val context = LocalContext.current
+    val resolvedCoverPath = remember(summary.coverMedia, summary.coverPhotoPath) {
+        summary.coverMedia?.let { PhotoStorageHelper.resolveDisplayThumbnailPath(context, it) }
+            ?: summary.coverPhotoPath
+    }
+
     Card(
         onClick = onClick,
         modifier = Modifier
@@ -448,7 +503,7 @@ private fun GroupMemoryFolderCard(
                     .aspectRatio(16f / 9f)
                     .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
             ) {
-                val coverFile = summary.coverPhotoPath?.let { File(it) }?.takeIf { it.exists() }
+                val coverFile = resolvedCoverPath?.let { File(it) }?.takeIf { it.exists() }
                 if (coverFile != null) {
                     AsyncImage(
                         model = coverFile,
@@ -458,6 +513,25 @@ private fun GroupMemoryFolderCard(
                     )
                 } else {
                     MemoryPhotoPlaceholder(subtitle = null)
+                }
+
+                if (summary.coverMedia?.isVideo == true) {
+                    Surface(
+                        shape = CircleShape,
+                        color = Color.Black.copy(alpha = 0.65f),
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(48.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Rounded.PlayArrow,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(28.dp)
+                            )
+                        }
+                    }
                 }
 
                 Surface(
@@ -568,7 +642,7 @@ private fun GroupMemoryFolderCard(
                         )
                     }
                     Text(
-                        text = "${summary.memoryCount} kenangan • ${summary.photoCount} foto",
+                        text = "${summary.memoryCount} kenangan • ${formatMediaCountLabel(summary.photoCount, summary.videoCount)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -636,7 +710,15 @@ private fun VisitMemoryThumbnailCard(
     item: VisitMemoryItem,
     onClick: () -> Unit
 ) {
+    val context = LocalContext.current
     val kunjungan = item.kunjungan
+    val firstMedia = item.coverMedia
+    val resolvedCoverPath = remember(firstMedia, item.coverPhotoPath) {
+        firstMedia?.let { PhotoStorageHelper.resolveDisplayThumbnailPath(context, it) }
+            ?: item.coverPhotoPath
+    }
+    val mediaCountText = formatMediaCountLabel(item.photoCount, item.videoCount)
+
     Card(
         onClick = onClick,
         modifier = Modifier
@@ -647,23 +729,42 @@ private fun VisitMemoryThumbnailCard(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            // Gambar sampul besar bergaya thumbnail YouTube (16:9) dari foto pertama kunjungan ini
+            // Gambar sampul besar bergaya thumbnail YouTube (16:9) dari media pertama kunjungan ini
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
                     .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
             ) {
-                val coverFile = item.coverPhotoPath?.let { File(it) }?.takeIf { it.exists() }
+                val coverFile = resolvedCoverPath?.let { File(it) }?.takeIf { it.exists() }
                 if (coverFile != null) {
                     AsyncImage(
                         model = coverFile,
-                        contentDescription = "Foto sampul ${kunjungan.locationName}",
+                        contentDescription = "Sampul ${kunjungan.locationName}",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
                     MemoryPhotoPlaceholder(subtitle = null)
+                }
+
+                if (firstMedia?.isVideo == true) {
+                    Surface(
+                        shape = CircleShape,
+                        color = Color.Black.copy(alpha = 0.65f),
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(50.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Rounded.PlayArrow,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(30.dp)
+                            )
+                        }
+                    }
                 }
 
                 // Badge nama trip di pojok kiri atas
@@ -683,7 +784,7 @@ private fun VisitMemoryThumbnailCard(
                     )
                 }
 
-                // Badge jumlah foto di pojok kanan bawah
+                // Badge jumlah media di pojok kanan bawah
                 Surface(
                     shape = RoundedCornerShape(10.dp),
                     color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
@@ -703,7 +804,7 @@ private fun VisitMemoryThumbnailCard(
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = "${item.fotos.size} foto",
+                            text = mediaCountText,
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface
@@ -749,7 +850,7 @@ private fun VisitMemoryThumbnailCard(
                     )
 
                     Text(
-                        text = "${DateUtils.formatTime(kunjungan.visitHour, kunjungan.visitMinute)} WIB • ${DateUtils.formatIndonesianShortDate(kunjungan.visitDateEpochDay)} • ${item.fotos.size} foto",
+                        text = "${DateUtils.formatTime(kunjungan.visitHour, kunjungan.visitMinute)} WIB • ${DateUtils.formatIndonesianShortDate(kunjungan.visitDateEpochDay)} • $mediaCountText",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 1,
@@ -758,7 +859,7 @@ private fun VisitMemoryThumbnailCard(
 
                     Text(
                         text = item.descriptionSnippet.ifBlank {
-                            "Ketuk kartu untuk melihat foto atau menulis deskripsi perjalanan."
+                            "Ketuk kartu untuk melihat foto/video atau menulis deskripsi perjalanan."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

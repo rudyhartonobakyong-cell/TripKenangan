@@ -1,8 +1,12 @@
 package com.example.ui.screens
 
+import android.net.Uri
+import android.widget.MediaController
+import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,12 +31,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AddAPhoto
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Map
+import androidx.compose.material.icons.rounded.PictureAsPdf
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -56,11 +65,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.Foto
@@ -69,24 +83,29 @@ import com.example.ui.DisplayVisit
 import com.example.ui.VisitMemoryItem
 import com.example.ui.components.MemoryPhotoPlaceholder
 import com.example.util.DateUtils
+import com.example.util.PhotoStorageHelper
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VisitMemoryDetailScreen(
     detail: VisitMemoryItem,
+    isExportingPdf: Boolean = false,
     onBack: () -> Unit,
     onTakePhotoForVisit: (DisplayVisit) -> Unit,
     onDeletePhoto: (Foto) -> Unit,
     onSaveMemoryNotes: (Kunjungan, String) -> Unit,
-    onOpenMapsForVisit: (DisplayVisit) -> Unit
+    onOpenMapsForVisit: (DisplayVisit) -> Unit,
+    onExportPdf: () -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
 
+    val context = LocalContext.current
     val visit = detail.kunjungan
-    val photos = detail.fotos
+    val mediaItems = detail.fotos
     val displayVisit = remember(detail) { detail.toDisplayVisit() }
-    var photoPendingDelete by remember { mutableStateOf<Foto?>(null) }
+    var mediaPendingDelete by remember { mutableStateOf<Foto?>(null) }
+    var activePlayingVideo by remember { mutableStateOf<Foto?>(null) }
 
     var notesText by rememberSaveable(visit.id, visit.memoryNotes) {
         mutableStateOf(visit.memoryNotes)
@@ -149,7 +168,7 @@ fun VisitMemoryDetailScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 item {
-                    if (photos.isEmpty()) {
+                    if (mediaItems.isEmpty()) {
                         Surface(
                             shape = RoundedCornerShape(20.dp),
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
@@ -158,32 +177,111 @@ fun VisitMemoryDetailScreen(
                                 .aspectRatio(16f / 9f)
                         ) {
                             MemoryPhotoPlaceholder(
-                                subtitle = "Belum ada foto untuk kunjungan ini"
+                                subtitle = "Belum ada foto atau video untuk kunjungan ini"
                             )
                         }
                     } else {
-                        val pagerState = rememberPagerState(pageCount = { photos.size })
+                        val pagerState = rememberPagerState(pageCount = { mediaItems.size })
                         Column(
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             HorizontalPager(
                                 state = pagerState,
-                                key = { index -> photos[index].id },
+                                key = { index -> mediaItems[index].id },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .aspectRatio(16f / 10f)
                                     .clip(RoundedCornerShape(20.dp))
                                     .testTag("memory_photo_pager")
                             ) { page ->
-                                val foto = photos[page]
-                                Box(modifier = Modifier.fillMaxSize()) {
-                                    AsyncImage(
-                                        model = File(foto.filePath),
-                                        contentDescription = "Foto kenangan di ${visit.locationName}",
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier.fillMaxSize()
-                                    )
+                                val media = mediaItems[page]
+                                val thumbPath = remember(media.id, media.filePath, media.mediaType) {
+                                    PhotoStorageHelper.resolveDisplayThumbnailPath(context, media)
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .then(
+                                            if (media.isVideo) {
+                                                Modifier.clickable { activePlayingVideo = media }
+                                            } else {
+                                                Modifier
+                                            }
+                                        )
+                                ) {
+                                    val displayFile = thumbPath?.let { File(it) }?.takeIf { it.exists() }
+                                    if (displayFile != null) {
+                                        AsyncImage(
+                                            model = displayFile,
+                                            contentDescription = if (media.isVideo) {
+                                                "Thumbnail video kenangan di ${visit.locationName}"
+                                            } else {
+                                                "Foto kenangan di ${visit.locationName}"
+                                            },
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    } else {
+                                        MemoryPhotoPlaceholder(
+                                            subtitle = if (media.isVideo) "Video kenangan" else "Foto kenangan"
+                                        )
+                                    }
+
+                                    if (media.isVideo) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .background(Color.Black.copy(alpha = 0.22f))
+                                        )
+
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = Color.Black.copy(alpha = 0.72f),
+                                            modifier = Modifier
+                                                .align(Alignment.TopStart)
+                                                .padding(12.dp)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Videocam,
+                                                    contentDescription = null,
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                                Text(
+                                                    text = "VIDEO",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color.White
+                                                )
+                                            }
+                                        }
+
+                                        Surface(
+                                            onClick = { activePlayingVideo = media },
+                                            shape = CircleShape,
+                                            color = Color.Black.copy(alpha = 0.72f),
+                                            border = BorderStroke(1.5.dp, Color.White.copy(alpha = 0.85f)),
+                                            modifier = Modifier
+                                                .align(Alignment.Center)
+                                                .size(64.dp)
+                                                .testTag("play_video_button_${media.id}")
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.PlayArrow,
+                                                    contentDescription = "Putar video kenangan",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(36.dp)
+                                                )
+                                            }
+                                        }
+                                    }
 
                                     Surface(
                                         shape = RoundedCornerShape(12.dp),
@@ -204,7 +302,7 @@ fun VisitMemoryDetailScreen(
                                                 modifier = Modifier.size(14.dp)
                                             )
                                             Text(
-                                                text = "${page + 1}/${photos.size} • ${visit.locationName}",
+                                                text = "${page + 1}/${mediaItems.size} • ${visit.locationName}",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.onSurface
                                             )
@@ -212,7 +310,7 @@ fun VisitMemoryDetailScreen(
                                     }
 
                                     IconButton(
-                                        onClick = { photoPendingDelete = foto },
+                                        onClick = { mediaPendingDelete = media },
                                         colors = IconButtonDefaults.filledIconButtonColors(
                                             containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
                                             contentColor = MaterialTheme.colorScheme.error
@@ -221,7 +319,7 @@ fun VisitMemoryDetailScreen(
                                             .align(Alignment.TopEnd)
                                             .padding(8.dp)
                                             .size(48.dp)
-                                            .testTag("delete_photo_button_${foto.id}")
+                                            .testTag("delete_photo_button_${media.id}")
                                     ) {
                                         Icon(
                                             imageVector = Icons.Rounded.DeleteOutline,
@@ -231,13 +329,13 @@ fun VisitMemoryDetailScreen(
                                 }
                             }
 
-                            if (photos.size > 1) {
+                            if (mediaItems.size > 1) {
                                 Row(
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.testTag("memory_pager_indicator")
                                 ) {
-                                    repeat(photos.size) { index ->
+                                    repeat(mediaItems.size) { index ->
                                         val selected = pagerState.currentPage == index
                                         Box(
                                             modifier = Modifier
@@ -260,21 +358,53 @@ fun VisitMemoryDetailScreen(
                 }
 
                 item {
-                    Button(
-                        onClick = { onTakePhotoForVisit(displayVisit) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp)
-                            .testTag("detail_add_photo_button"),
-                        shape = RoundedCornerShape(14.dp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.AddAPhoto,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Tambah Foto")
+                        Button(
+                            onClick = { onTakePhotoForVisit(displayVisit) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(50.dp)
+                                .testTag("detail_add_photo_button"),
+                            shape = RoundedCornerShape(14.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.AddAPhoto,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Foto / Video")
+                        }
+
+                        OutlinedButton(
+                            onClick = onExportPdf,
+                            enabled = !isExportingPdf,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(50.dp)
+                                .testTag("detail_export_pdf_button"),
+                            shape = RoundedCornerShape(14.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp)
+                        ) {
+                            if (isExportingPdf) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.PictureAsPdf,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Ekspor PDF")
+                            }
+                        }
                     }
                 }
 
@@ -390,20 +520,21 @@ fun VisitMemoryDetailScreen(
         }
     }
 
-    val pendingDelete = photoPendingDelete
+    val pendingDelete = mediaPendingDelete
     if (pendingDelete != null) {
+        val mediaWord = if (pendingDelete.isVideo) "Video" else "Foto"
         AlertDialog(
-            onDismissRequest = { photoPendingDelete = null },
-            title = { Text("Hapus Foto Ini?") },
+            onDismissRequest = { mediaPendingDelete = null },
+            title = { Text("Hapus $mediaWord Ini?") },
             text = {
                 Text(
-                    "Foto akan dihapus dari kunjungan \"${visit.locationName}\" di aplikasi TripBuddy. Salinan di galeri perangkat Anda tetap tersimpan."
+                    "$mediaWord akan dihapus dari kunjungan \"${visit.locationName}\" di aplikasi TripBuddy. Salinan di galeri perangkat Anda tetap tersimpan."
                 )
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        photoPendingDelete = null
+                        mediaPendingDelete = null
                         onDeletePhoto(pendingDelete)
                     },
                     colors = ButtonDefaults.buttonColors(
@@ -416,10 +547,126 @@ fun VisitMemoryDetailScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { photoPendingDelete = null }) {
+                TextButton(onClick = { mediaPendingDelete = null }) {
                     Text("Batal")
                 }
             }
         )
+    }
+
+    val playingVideo = activePlayingVideo
+    if (playingVideo != null) {
+        VideoPlayerDialog(
+            video = playingVideo,
+            locationName = visit.locationName,
+            onDismiss = { activePlayingVideo = null }
+        )
+    }
+}
+
+@Composable
+private fun VideoPlayerDialog(
+    video: Foto,
+    locationName: String,
+    onDismiss: () -> Unit
+) {
+    val videoFile = remember(video.filePath) { File(video.filePath) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            shape = RoundedCornerShape(22.dp),
+            color = Color.Black,
+            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.2f))
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Videocam,
+                            contentDescription = null,
+                            tint = Color.White
+                        )
+                        Text(
+                            text = locationName,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color.White,
+                            maxLines = 1
+                        )
+                    }
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("close_video_player_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "Tutup pemutar video",
+                            tint = Color.White
+                        )
+                    }
+                }
+
+                if (videoFile.exists() && videoFile.length() > 0L) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(16f / 10f)
+                            .background(Color.Black),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AndroidView(
+                            factory = { ctx ->
+                                VideoView(ctx).apply {
+                                    val controller = MediaController(ctx)
+                                    controller.setAnchorView(this)
+                                    setMediaController(controller)
+                                    setVideoURI(Uri.fromFile(videoFile))
+                                    setOnPreparedListener { mp ->
+                                        mp.isLooping = false
+                                        start()
+                                    }
+                                }
+                            },
+                            onRelease = { view ->
+                                view.stopPlayback()
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(200.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "File video tidak ditemukan di perangkat.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color.White.copy(alpha = 0.85f)
+                        )
+                    }
+                }
+            }
+        }
     }
 }

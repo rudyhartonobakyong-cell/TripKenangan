@@ -10,7 +10,7 @@ import java.util.UUID
 
 @Database(
     entities = [Trip::class, Kunjungan::class, Foto::class],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class TripBuddyDatabase : RoomDatabase() {
@@ -213,6 +213,12 @@ abstract class TripBuddyDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE foto ADD COLUMN mediaType TEXT NOT NULL DEFAULT 'PHOTO'")
+            }
+        }
+
         fun getInstance(context: Context): TripBuddyDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -220,7 +226,7 @@ abstract class TripBuddyDatabase : RoomDatabase() {
                     TripBuddyDatabase::class.java,
                     "tripbuddy_database"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .addCallback(object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
                             super.onCreate(db)

@@ -42,6 +42,9 @@ interface KunjunganDao {
     @Query("SELECT * FROM kunjungan WHERE isCompletedManually = 0")
     suspend fun getPendingKunjunganOnce(): List<Kunjungan>
 
+    @Query("SELECT * FROM kunjungan")
+    suspend fun getAllKunjunganOnce(): List<Kunjungan>
+
     @Upsert
     suspend fun upsertKunjungan(kunjungan: Kunjungan)
 

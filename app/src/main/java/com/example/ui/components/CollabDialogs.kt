@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,19 +24,24 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material.icons.rounded.BatterySaver
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.GroupAdd
+import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Palette
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -43,6 +49,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -65,6 +72,8 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.collab.FirestoreConnectionTestResult
 import com.example.collab.SharedTrip
+import com.example.notifications.ReminderTimingOption
+import com.example.notifications.UserReminderSettings
 import com.example.ui.theme.AppThemeOption
 
 @Composable
@@ -369,6 +378,15 @@ fun AccountProfileSheet(
     photoUrl: String,
     selectedTheme: AppThemeOption,
     onSelectTheme: (AppThemeOption) -> Unit,
+    reminderSettings: UserReminderSettings,
+    hasNotificationPermission: Boolean,
+    canScheduleExactAlarms: Boolean,
+    onSetRemindersEnabled: (Boolean) -> Unit,
+    onToggleReminderTiming: (ReminderTimingOption) -> Unit,
+    onSetAnnualMemoryReminderEnabled: (Boolean) -> Unit,
+    onRequestNotificationPermission: () -> Unit,
+    onRequestExactAlarmPermission: () -> Unit,
+    onOpenBatteryAppInfo: () -> Unit,
     projectId: String,
     databaseId: String,
     isTestingFirestore: Boolean,
@@ -460,6 +478,18 @@ fun AccountProfileSheet(
             ThemeSelectorSection(
                 selectedTheme = selectedTheme,
                 onSelectTheme = onSelectTheme
+            )
+
+            ReminderSettingsSection(
+                reminderSettings = reminderSettings,
+                hasNotificationPermission = hasNotificationPermission,
+                canScheduleExactAlarms = canScheduleExactAlarms,
+                onSetRemindersEnabled = onSetRemindersEnabled,
+                onToggleReminderTiming = onToggleReminderTiming,
+                onSetAnnualMemoryReminderEnabled = onSetAnnualMemoryReminderEnabled,
+                onRequestNotificationPermission = onRequestNotificationPermission,
+                onRequestExactAlarmPermission = onRequestExactAlarmPermission,
+                onOpenBatteryAppInfo = onOpenBatteryAppInfo
             )
 
             Surface(
@@ -715,6 +745,275 @@ private fun ThemeSelectorSection(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReminderSettingsSection(
+    reminderSettings: UserReminderSettings,
+    hasNotificationPermission: Boolean,
+    canScheduleExactAlarms: Boolean,
+    onSetRemindersEnabled: (Boolean) -> Unit,
+    onToggleReminderTiming: (ReminderTimingOption) -> Unit,
+    onSetAnnualMemoryReminderEnabled: (Boolean) -> Unit,
+    onRequestNotificationPermission: () -> Unit,
+    onRequestExactAlarmPermission: () -> Unit,
+    onOpenBatteryAppInfo: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.NotificationsActive,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    text = "Pengingat Otomatis",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text(
+                        text = "Aktifkan pengingat kunjungan",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Berlaku untuk kunjungan di ruang Pribadi dan Grup.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = reminderSettings.enabled,
+                    onCheckedChange = onSetRemindersEnabled,
+                    modifier = Modifier.testTag("reminder_enabled_switch")
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+
+            Text(
+                text = "Waktu Pengingat",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                ReminderTimingOption.entries.forEach { option ->
+                    val checked = option in reminderSettings.selectedTimings
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable(enabled = reminderSettings.enabled) {
+                                onToggleReminderTiming(option)
+                            }
+                            .padding(vertical = 4.dp, horizontal = 4.dp)
+                            .testTag("reminder_timing_${option.id}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Checkbox(
+                            checked = checked,
+                            onCheckedChange = { onToggleReminderTiming(option) },
+                            enabled = reminderSettings.enabled
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = option.label,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (reminderSettings.enabled) {
+                                    MaterialTheme.colorScheme.onSurface
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                            Text(
+                                text = option.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text(
+                        text = "Pengingat Kenangan Tahunan",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Kirim notifikasi \"Setahun lalu: [lokasi]\" tiap tahun pada tanggal kunjungan.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = reminderSettings.annualMemoryReminderEnabled,
+                    onCheckedChange = onSetAnnualMemoryReminderEnabled,
+                    enabled = reminderSettings.enabled,
+                    modifier = Modifier.testTag("reminder_annual_memory_switch")
+                )
+            }
+
+            if (!hasNotificationPermission || !canScheduleExactAlarms) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (!hasNotificationPermission) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Izin Notifikasi Belum Aktif",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                    Text(
+                                        text = "Diperlukan agar pengingat perjalanan & kenangan dapat muncul.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                }
+                                TextButton(
+                                    onClick = onRequestNotificationPermission,
+                                    modifier = Modifier.testTag("request_notification_permission_button")
+                                ) {
+                                    Text("Izinkan")
+                                }
+                            }
+                        }
+                    }
+
+                    if (!canScheduleExactAlarms) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Alarm Tepat Waktu Belum Aktif",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                    Text(
+                                        text = "Aktifkan agar pengingat H-1 jam 09.00 & sebelum kunjungan berbunyi presisi.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                }
+                                TextButton(
+                                    onClick = onRequestExactAlarmPermission,
+                                    modifier = Modifier.testTag("request_exact_alarm_permission_button")
+                                ) {
+                                    Text("Atur")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.BatterySaver,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "Pengaturan Baterai (Xiaomi / Oppo / Vivo)",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    Text(
+                        text = "Agar pengingat tetap muncul tepat waktu saat layar mati atau HP jarang dibuka:\n" +
+                            "• Xiaomi (MIUI/HyperOS): Pengaturan > Aplikasi > TripBuddy > Penghemat baterai > pilih \"Tanpa batasan\" (dan aktifkan Mulai Otomatis).\n" +
+                            "• Oppo / Realme (ColorOS): Info Aplikasi > Penggunaan baterai > aktifkan \"Izinkan aktivitas latar belakang\".\n" +
+                            "• Vivo (FuntouchOS): Info Aplikasi > Baterai > pilih \"Tidak dibatasi\".",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedButton(
+                        onClick = onOpenBatteryAppInfo,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("open_battery_settings_button"),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Settings,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Buka Info Aplikasi")
                     }
                 }
             }

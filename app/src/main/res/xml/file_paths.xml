@@ -9,4 +9,7 @@
     <files-path
         name="memory_photos"
         path="memory_photos/" />
+    <cache-path
+        name="pdf_exports"
+        path="pdf_exports/" />
 </paths>

@@ -17,10 +17,15 @@ import com.example.data.Kunjungan
 import com.example.data.Trip
 import com.example.data.TripRepository
 import com.example.notifications.AlarmScheduleResult
+import com.example.notifications.ReminderTimingOption
 import com.example.notifications.TripAlarmScheduler
+import com.example.notifications.UserReminderSettings
 import com.example.util.DateUtils
+import com.example.util.ExportedPdfResult
+import com.example.util.PdfExporter
 import com.example.util.PhotoStorageHelper
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -40,6 +45,9 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 import kotlin.math.abs
@@ -76,7 +84,10 @@ data class VisitMemoryItem(
     val trip: Trip,
     val fotos: List<Foto>
 ) {
+    val coverMedia: Foto? get() = fotos.firstOrNull()
     val coverPhotoPath: String? get() = fotos.firstOrNull()?.filePath
+    val photoCount: Int get() = fotos.count { !it.isVideo }
+    val videoCount: Int get() = fotos.count { it.isVideo }
     val descriptionSnippet: String get() = kunjungan.memoryNotes.ifBlank { kunjungan.planNotes }.trim()
     fun toDisplayVisit(): DisplayVisit = DisplayVisit.fromKunjungan(kunjungan, trip.name)
 }
@@ -86,7 +97,9 @@ data class GroupMemorySummary(
     val dateRangeLabel: String,
     val memoryCount: Int,
     val photoCount: Int,
+    val videoCount: Int = 0,
     val coverPhotoPath: String?,
+    val coverMedia: Foto? = null,
     val latestSortKey: Long
 )
 
@@ -131,7 +144,10 @@ private data class NavAndModalState(
     val showAccountSheet: Boolean = false,
     val isTestingFirestore: Boolean = false,
     val firestoreTestResult: FirestoreConnectionTestResult? = null,
-    val collabErrorMessage: String? = null
+    val collabErrorMessage: String? = null,
+    val isExportingPdf: Boolean = false,
+    val exportedPdfResult: ExportedPdfResult? = null,
+    val reminderSettings: UserReminderSettings = UserReminderSettings()
 )
 
 data class TripBuddyUiState(
@@ -189,7 +205,10 @@ data class TripBuddyUiState(
     val showAccountSheet: Boolean = false,
     val isTestingFirestore: Boolean = false,
     val firestoreTestResult: FirestoreConnectionTestResult? = null,
-    val collabErrorMessage: String? = null
+    val collabErrorMessage: String? = null,
+    val isExportingPdf: Boolean = false,
+    val exportedPdfResult: ExportedPdfResult? = null,
+    val reminderSettings: UserReminderSettings = UserReminderSettings()
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -220,13 +239,21 @@ class TripBuddyViewModel(
         .distinctUntilChanged()
 
     private val lastSyncedSharedTrips = MutableStateFlow<List<SharedTrip>>(emptyList())
+    private val reminderSyncMutex = Mutex()
+    @Volatile
+    private var latestRoomSnapshot: RoomBaseSnapshot? = null
 
     init {
+        alarmScheduler.setActiveUser(currentUserId)
+        val initialReminderSettings = alarmScheduler.getUserReminderSettings(currentUserId)
+        navAndModalState.update { it.copy(reminderSettings = initialReminderSettings) }
+
         viewModelScope.launch {
             localRepository.ensurePersonalTripExists()
+            rescheduleAllLocalReminders()
         }
         // Background sync: keep ALL shared trips and ALL their visits synced into Room
-        // without wiping local memories or photos when offline or switching workspaces.
+        // and keep local AlarmManager reminders synchronized with Firestore changes.
         viewModelScope.launch {
             lastSyncedSharedTrips
                 .flatMapLatest { trips ->
@@ -236,7 +263,9 @@ class TripBuddyViewModel(
                         trips.map { trip ->
                             collabRepository.observeTripVisits(trip.id)
                                 .onEach { remoteVisits ->
-                                    localRepository.syncSharedVisitsToRoom(trip, remoteVisits)
+                                    val removedIds = localRepository.syncSharedVisitsToRoom(trip, remoteVisits)
+                                    removedIds.forEach { alarmScheduler.cancelVisitReminder(it) }
+                                    rescheduleAllLocalReminders()
                                 }
                                 .catch { error ->
                                     val firestoreError = extractFirestoreException(error)
@@ -250,6 +279,31 @@ class TripBuddyViewModel(
         }
     }
 
+    private suspend fun rescheduleAllLocalReminders() {
+        reminderSyncMutex.withLock {
+            withContext(Dispatchers.IO) {
+                val tripsById = localRepository.getAllTripsOnce().associateBy { it.id }
+                val allVisits = localRepository.getAllKunjunganOnce()
+                val settings = navAndModalState.value.reminderSettings
+                alarmScheduler.rescheduleAllReminders(
+                    visits = allVisits,
+                    tripsById = tripsById,
+                    settings = settings
+                )
+            }
+        }
+    }
+
+    private fun resolveGroupOrSpaceName(tripId: String, remoteTripId: String?): String {
+        val fromShared = remoteTripId?.let { rId ->
+            uiState.value.sharedTrips.find { it.id == rId }?.title
+        }
+        if (!fromShared.isNullOrBlank()) return fromShared
+        val fromRoom = latestRoomSnapshot?.allTrips?.find { it.id == tripId }?.name
+        if (!fromRoom.isNullOrBlank()) return fromRoom
+        return if (remoteTripId != null) "Trip Bersama" else "Pribadi"
+    }
+
     private fun extractErrorMessage(error: Throwable, fallback: String): String {
         return formatFirestoreErrorForUi(error, fallback)
     }
@@ -258,6 +312,7 @@ class TripBuddyViewModel(
         .onEach { trips ->
             lastSyncedSharedTrips.value = trips
             localRepository.syncSharedTripsToRoom(trips)
+            rescheduleAllLocalReminders()
             val currentSharedId = (navAndModalState.value.activeWorkspace as? Workspace.Shared)?.tripId
             if (currentSharedId != null && trips.none { it.id == currentSharedId }) {
                 navAndModalState.update { state ->
@@ -355,7 +410,7 @@ class TripBuddyViewModel(
             allFotos = fotos,
             memoryItems = memoryItems,
             activeDetail = activeDetail
-        )
+        ).also { latestRoomSnapshot = it }
     }
 
     val uiState: StateFlow<TripBuddyUiState> = combine(
@@ -547,7 +602,10 @@ class TripBuddyViewModel(
             showAccountSheet = nav.showAccountSheet,
             isTestingFirestore = nav.isTestingFirestore,
             firestoreTestResult = nav.firestoreTestResult,
-            collabErrorMessage = nav.collabErrorMessage
+            collabErrorMessage = nav.collabErrorMessage,
+            isExportingPdf = nav.isExportingPdf,
+            exportedPdfResult = nav.exportedPdfResult,
+            reminderSettings = nav.reminderSettings
         )
     }.stateIn(
         scope = viewModelScope,
@@ -936,11 +994,107 @@ class TripBuddyViewModel(
         }
     }
 
-    fun deleteMemoryPhoto(foto: Foto) {
+    fun saveCapturedVideo(
+        context: Context,
+        kunjunganId: String,
+        tempVideoFile: File
+    ) {
         viewModelScope.launch {
-            localRepository.deleteFoto(foto)
-            _snackbarEvents.trySend("Foto dihapus dari aplikasi")
+            val result = localRepository.saveCapturedVideoForKunjungan(
+                context = context.applicationContext,
+                tempVideoFile = tempVideoFile,
+                kunjunganId = kunjunganId
+            )
+            result.onSuccess { video ->
+                val message = if (video.mediaStoreUri != null) {
+                    "Video kenangan disimpan di aplikasi & album TripBuddy"
+                } else {
+                    "Video kenangan disimpan di penyimpanan aplikasi"
+                }
+                _snackbarEvents.trySend(message)
+            }.onFailure { error ->
+                PhotoStorageHelper.deleteFileQuietly(tempVideoFile.absolutePath)
+                _snackbarEvents.trySend(
+                    "Gagal menyimpan video: ${error.localizedMessage ?: "terjadi kesalahan"}"
+                )
+            }
         }
+    }
+
+    fun deleteMemoryPhoto(foto: Foto, filesDir: File? = null) {
+        viewModelScope.launch {
+            localRepository.deleteFoto(foto, filesDir)
+            val label = if (foto.isVideo) "Video" else "Foto"
+            _snackbarEvents.trySend("$label dihapus dari aplikasi")
+        }
+    }
+
+    fun exportSingleMemoryPdf(context: Context, detail: VisitMemoryItem) {
+        if (navAndModalState.value.isExportingPdf) return
+        navAndModalState.update { it.copy(isExportingPdf = true) }
+        val appContext = context.applicationContext
+        viewModelScope.launch {
+            val spec = PdfExporter.buildSingleVisitPdfSpec(detail)
+            val result = withContext(Dispatchers.IO) {
+                PdfExporter.exportSpecToPdf(appContext, spec)
+            }
+            result.onSuccess { exported ->
+                navAndModalState.update {
+                    it.copy(isExportingPdf = false, exportedPdfResult = exported)
+                }
+            }.onFailure { error ->
+                navAndModalState.update { it.copy(isExportingPdf = false) }
+                _snackbarEvents.trySend(
+                    "Gagal mengekspor PDF: ${error.localizedMessage ?: "terjadi kesalahan"}"
+                )
+            }
+        }
+    }
+
+    fun exportGroupMemoriesPdf(
+        context: Context,
+        tripUuid: String,
+        groupTitle: String,
+        fallbackDateLabel: String = ""
+    ) {
+        if (navAndModalState.value.isExportingPdf) return
+        navAndModalState.update { it.copy(isExportingPdf = true) }
+        val appContext = context.applicationContext
+        val roomSnapshot = latestRoomSnapshot
+        val visitsInGroup = roomSnapshot?.allKunjungan?.filter { it.tripId == tripUuid }
+            ?: uiState.value.visitMemories.filter { it.trip.id == tripUuid }.map { it.kunjungan }
+        val fotosByVisitId = roomSnapshot?.allFotos
+            ?.filter { it.tripId == tripUuid }
+            ?.groupBy { it.kunjunganId }
+            ?: uiState.value.visitMemories
+                .filter { it.trip.id == tripUuid }
+                .associate { it.kunjungan.id to it.fotos }
+
+        viewModelScope.launch {
+            val spec = PdfExporter.buildGroupPdfSpec(
+                groupTitle = groupTitle,
+                kunjunganList = visitsInGroup,
+                fotosByVisitId = fotosByVisitId,
+                fallbackDateLabel = fallbackDateLabel
+            )
+            val result = withContext(Dispatchers.IO) {
+                PdfExporter.exportSpecToPdf(appContext, spec)
+            }
+            result.onSuccess { exported ->
+                navAndModalState.update {
+                    it.copy(isExportingPdf = false, exportedPdfResult = exported)
+                }
+            }.onFailure { error ->
+                navAndModalState.update { it.copy(isExportingPdf = false) }
+                _snackbarEvents.trySend(
+                    "Gagal mengekspor PDF grup: ${error.localizedMessage ?: "terjadi kesalahan"}"
+                )
+            }
+        }
+    }
+
+    fun dismissExportedPdfDialog() {
+        navAndModalState.update { it.copy(exportedPdfResult = null) }
     }
 
     fun goToPreviousMonth() {
@@ -1080,7 +1234,11 @@ class TripBuddyViewModel(
                         planNotes = planNotes.trim()
                     )
                     localRepository.upsertKunjungan(updatedEntity)
-                    alarmScheduler.scheduleVisitReminder(updatedEntity)
+                    alarmScheduler.scheduleVisitReminder(
+                        visit = updatedEntity,
+                        groupOrSpaceName = resolveGroupOrSpaceName(updatedEntity.tripId, updatedEntity.remoteTripId),
+                        settings = navAndModalState.value.reminderSettings
+                    )
                     dismissAddEditSheet()
                     _snackbarEvents.trySend("Lokasi \"$cleanLocation\" diperbarui untuk semua anggota")
                 }.onFailure { error ->
@@ -1120,7 +1278,11 @@ class TripBuddyViewModel(
                         createdAtMillis = System.currentTimeMillis()
                     )
                     localRepository.upsertKunjungan(entity)
-                    alarmScheduler.scheduleVisitReminder(entity)
+                    alarmScheduler.scheduleVisitReminder(
+                        visit = entity,
+                        groupOrSpaceName = resolveGroupOrSpaceName(entity.tripId, entity.remoteTripId),
+                        settings = navAndModalState.value.reminderSettings
+                    )
                     dismissAddEditSheet()
                     _snackbarEvents.trySend("Lokasi \"$cleanLocation\" ditambahkan ke trip bersama")
                 }.onFailure { error ->
@@ -1136,7 +1298,11 @@ class TripBuddyViewModel(
                     planNotes = planNotes.trim()
                 )
                 localRepository.upsertKunjungan(updated)
-                alarmScheduler.scheduleVisitReminder(updated)
+                alarmScheduler.scheduleVisitReminder(
+                    visit = updated,
+                    groupOrSpaceName = resolveGroupOrSpaceName(updated.tripId, updated.remoteTripId),
+                    settings = navAndModalState.value.reminderSettings
+                )
                 dismissAddEditSheet()
                 _snackbarEvents.trySend("Lokasi \"$cleanLocation\" disimpan beserta pengingatnya")
             } else {
@@ -1151,7 +1317,11 @@ class TripBuddyViewModel(
                     planNotes = planNotes.trim()
                 )
                 localRepository.upsertKunjungan(newVisit)
-                alarmScheduler.scheduleVisitReminder(newVisit)
+                alarmScheduler.scheduleVisitReminder(
+                    visit = newVisit,
+                    groupOrSpaceName = "Pribadi",
+                    settings = navAndModalState.value.reminderSettings
+                )
                 dismissAddEditSheet()
                 _snackbarEvents.trySend("Lokasi \"$cleanLocation\" disimpan beserta pengingatnya")
             }
@@ -1178,14 +1348,22 @@ class TripBuddyViewModel(
                 result.onSuccess {
                     val updated = visit.toKunjunganEntity().copy(locationName = clean)
                     localRepository.upsertKunjungan(updated)
-                    alarmScheduler.scheduleVisitReminder(updated)
+                    alarmScheduler.scheduleVisitReminder(
+                        visit = updated,
+                        groupOrSpaceName = resolveGroupOrSpaceName(updated.tripId, updated.remoteTripId),
+                        settings = navAndModalState.value.reminderSettings
+                    )
                 }.onFailure { error ->
                     _snackbarEvents.trySend(extractErrorMessage(error, "Gagal memperbarui nama lokasi."))
                 }
             } else {
                 val updated = visit.toKunjunganEntity().copy(locationName = clean)
                 localRepository.upsertKunjungan(updated)
-                alarmScheduler.scheduleVisitReminder(updated)
+                alarmScheduler.scheduleVisitReminder(
+                    visit = updated,
+                    groupOrSpaceName = resolveGroupOrSpaceName(updated.tripId, updated.remoteTripId),
+                    settings = navAndModalState.value.reminderSettings
+                )
             }
         }
     }
@@ -1209,22 +1387,22 @@ class TripBuddyViewModel(
                 result.onSuccess {
                     val updated = visit.toKunjunganEntity().copy(isCompletedManually = nextCompleted)
                     localRepository.upsertKunjungan(updated)
-                    if (nextCompleted) {
-                        alarmScheduler.cancelVisitReminder(updated.id)
-                    } else {
-                        alarmScheduler.scheduleVisitReminder(updated)
-                    }
+                    alarmScheduler.scheduleVisitReminder(
+                        visit = updated,
+                        groupOrSpaceName = resolveGroupOrSpaceName(updated.tripId, updated.remoteTripId),
+                        settings = navAndModalState.value.reminderSettings
+                    )
                 }.onFailure { error ->
                     _snackbarEvents.trySend(extractErrorMessage(error, "Gagal memperbarui status lokasi."))
                 }
             } else {
                 val updated = visit.toKunjunganEntity().copy(isCompletedManually = nextCompleted)
                 localRepository.upsertKunjungan(updated)
-                if (updated.isCompletedManually) {
-                    alarmScheduler.cancelVisitReminder(updated.id)
-                } else {
-                    alarmScheduler.scheduleVisitReminder(updated)
-                }
+                alarmScheduler.scheduleVisitReminder(
+                    visit = updated,
+                    groupOrSpaceName = resolveGroupOrSpaceName(updated.tripId, updated.remoteTripId),
+                    settings = navAndModalState.value.reminderSettings
+                )
             }
         }
     }
@@ -1317,6 +1495,32 @@ class TripBuddyViewModel(
         }
     }
 
+    fun setRemindersEnabled(enabled: Boolean) {
+        val updated = navAndModalState.value.reminderSettings.copy(enabled = enabled)
+        updateAndRescheduleReminderSettings(updated)
+    }
+
+    fun toggleReminderTiming(option: ReminderTimingOption) {
+        val current = navAndModalState.value.reminderSettings
+        val nextSet = current.selectedTimings.toMutableSet().apply {
+            if (!add(option)) remove(option)
+        }
+        updateAndRescheduleReminderSettings(current.copy(selectedTimings = nextSet))
+    }
+
+    fun setAnnualMemoryReminderEnabled(enabled: Boolean) {
+        val updated = navAndModalState.value.reminderSettings.copy(annualMemoryReminderEnabled = enabled)
+        updateAndRescheduleReminderSettings(updated)
+    }
+
+    private fun updateAndRescheduleReminderSettings(updated: UserReminderSettings) {
+        navAndModalState.update { it.copy(reminderSettings = updated) }
+        alarmScheduler.saveUserReminderSettings(currentUserId, updated)
+        viewModelScope.launch {
+            rescheduleAllLocalReminders()
+        }
+    }
+
     fun scheduleTestNotification(): AlarmScheduleResult {
         return alarmScheduler.scheduleTestNotification(delaySeconds = 10)
     }
@@ -1398,10 +1602,11 @@ class TripBuddyViewModel(
                         .thenBy { it.kunjungan.visitMinute }
                         .thenBy { it.kunjungan.createdAtMillis }
                 )
-                val firstPhotoPath = chronologicalMemories
-                    .firstNotNullOfOrNull { item -> item.fotos.firstOrNull()?.filePath }
+                val firstCoverMedia = chronologicalMemories
+                    .firstNotNullOfOrNull { item -> item.fotos.firstOrNull() }
 
-                val totalPhotos = groupMemories.sumOf { it.fotos.size }
+                val totalPhotos = groupMemories.sumOf { item -> item.fotos.count { !it.isVideo } }
+                val totalVideos = groupMemories.sumOf { item -> item.fotos.count { it.isVideo } }
 
                 val latestVisitKey = (groupMemories.map { it.kunjungan } + groupVisits)
                     .maxOfOrNull { k ->
@@ -1413,7 +1618,9 @@ class TripBuddyViewModel(
                     dateRangeLabel = formatDateRange(allDays),
                     memoryCount = groupMemories.size,
                     photoCount = totalPhotos,
-                    coverPhotoPath = firstPhotoPath,
+                    videoCount = totalVideos,
+                    coverPhotoPath = firstCoverMedia?.filePath,
+                    coverMedia = firstCoverMedia,
                     latestSortKey = latestVisitKey
                 )
             }.sortedWith(

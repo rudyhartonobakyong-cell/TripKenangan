@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.PictureAsPdf
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -66,8 +67,10 @@ fun TripMembersScreen(
     members: List<TripMember>,
     currentUserId: String,
     isSubmitting: Boolean,
+    isExportingPdf: Boolean = false,
     onBack: () -> Unit,
     onInviteClick: () -> Unit,
+    onExportGroupPdf: () -> Unit = {},
     onTransferAdmin: (TripMember) -> Unit,
     onLeaveGroup: () -> Unit,
     onDeleteGroup: () -> Unit
@@ -184,22 +187,49 @@ fun TripMembersScreen(
                 }
 
                 item {
-                    Button(
-                        onClick = onInviteClick,
-                        enabled = !isSubmitting,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp)
-                            .testTag("members_invite_button"),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.GroupAdd,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Undang anggota (${trip.inviteCode})")
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = onInviteClick,
+                            enabled = !isSubmitting,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(50.dp)
+                                .testTag("members_invite_button"),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.GroupAdd,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Undang anggota (${trip.inviteCode})")
+                        }
+
+                        OutlinedButton(
+                            onClick = onExportGroupPdf,
+                            enabled = !isSubmitting && !isExportingPdf,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(50.dp)
+                                .testTag("group_export_pdf_button"),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            if (isExportingPdf) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.PictureAsPdf,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Ekspor PDF")
+                            }
+                        }
                     }
                 }
 

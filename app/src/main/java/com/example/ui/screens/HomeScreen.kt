@@ -520,7 +520,7 @@ private fun NearestTripCountdownCard(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Foto",
+                            text = "Kamera",
                             style = MaterialTheme.typography.labelLarge
                         )
                     }

@@ -7,6 +7,9 @@ import com.example.collab.SharedVisit
 import com.example.data.Foto
 import com.example.data.Kunjungan
 import com.example.data.Trip
+import com.example.notifications.ReminderKind
+import com.example.notifications.ReminderTimingOption
+import com.example.notifications.TripAlarmScheduler
 import com.example.ui.DisplayVisit
 import com.example.ui.MemoriesFilterTab
 import com.example.ui.SpaceMode
@@ -15,6 +18,7 @@ import com.example.ui.VisitMemoryItem
 import com.example.ui.Workspace
 import com.example.ui.theme.AppThemeOption
 import com.example.util.DateUtils
+import com.example.util.PdfExporter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -334,5 +338,204 @@ class ExampleUnitTest {
     assertEquals(0, summaries[1].photoCount)
     assertNull(summaries[1].coverPhotoPath)
     assertEquals("10 Okt 2026", summaries[1].dateRangeLabel)
+  }
+
+  @Test
+  fun `Foto distinguishes PHOTO and VIDEO media types correctly`() {
+    val photo = Foto(
+      id = "p1",
+      kunjunganId = "k1",
+      tripId = "t1",
+      filePath = "/fotos/t1/k1/p1.jpg"
+    )
+    val video = Foto(
+      id = "v1",
+      kunjunganId = "k1",
+      tripId = "t1",
+      filePath = "/fotos/t1/k1/v1.mp4",
+      mediaType = Foto.MEDIA_TYPE_VIDEO
+    )
+
+    assertEquals(Foto.MEDIA_TYPE_PHOTO, photo.mediaType)
+    assertFalse(photo.isVideo)
+    assertEquals(Foto.MEDIA_TYPE_VIDEO, video.mediaType)
+    assertTrue(video.isVideo)
+
+    val item = VisitMemoryItem(
+      kunjungan = Kunjungan(
+        id = "k1",
+        tripId = "t1",
+        locationName = "Pantai Pandawa",
+        visitDateEpochDay = DateUtils.epochDayFromYmd(2026, 10, 10),
+        visitHour = 17,
+        visitMinute = 15
+      ),
+      trip = Trip.personalTrip(),
+      fotos = listOf(photo, video)
+    )
+    assertEquals(1, item.photoCount)
+    assertEquals(1, item.videoCount)
+  }
+
+  @Test
+  fun `PdfExporter builds single visit and chronological group specs cleanly`() {
+    val day1 = DateUtils.epochDayFromYmd(2026, 9, 10)
+    val day2 = DateUtils.epochDayFromYmd(2026, 9, 12)
+
+    val kLate = Kunjungan(
+      id = "k2",
+      tripId = Trip.sharedTripUuid("bali"),
+      locationName = "Ubud Monkey Forest",
+      visitDateEpochDay = day2,
+      visitHour = 10,
+      visitMinute = 30,
+      memoryNotes = "Hari kedua di Ubud"
+    )
+    val kEarlyAfternoon = Kunjungan(
+      id = "k1b",
+      tripId = Trip.sharedTripUuid("bali"),
+      locationName = "Tanah Lot",
+      visitDateEpochDay = day1,
+      visitHour = 17,
+      visitMinute = 0,
+      memoryNotes = "Sunset indah"
+    )
+    val kEarlyMorning = Kunjungan(
+      id = "k1a",
+      tripId = Trip.sharedTripUuid("bali"),
+      locationName = "Tanjung Benoa",
+      visitDateEpochDay = day1,
+      visitHour = 8,
+      visitMinute = 15,
+      planNotes = "Pagi di pantai"
+    )
+
+    val p1 = Foto(id = "p1", kunjunganId = kEarlyMorning.id, tripId = kEarlyMorning.tripId, filePath = "/a.jpg", createdAtMillis = 10L)
+    val v1 = Foto(id = "v1", kunjunganId = kEarlyAfternoon.id, tripId = kEarlyAfternoon.tripId, filePath = "/b.mp4", createdAtMillis = 20L, mediaType = Foto.MEDIA_TYPE_VIDEO)
+
+    val groupSpec = PdfExporter.buildGroupPdfSpec(
+      groupTitle = "Bali 2026",
+      kunjunganList = listOf(kLate, kEarlyAfternoon, kEarlyMorning),
+      fotosByVisitId = mapOf(
+        kEarlyMorning.id to listOf(p1),
+        kEarlyAfternoon.id to listOf(v1)
+      )
+    )
+
+    assertEquals("Bali 2026", groupSpec.coverTitle)
+    assertEquals("10 Okt 2026 – 12 Okt 2026", groupSpec.coverDateLabel)
+    assertEquals(3, groupSpec.pages.size)
+    assertEquals(1, groupSpec.totalPhotos)
+    assertEquals(1, groupSpec.totalVideos)
+    assertEquals("Tanjung Benoa", groupSpec.pages[0].locationName)
+    assertEquals("Tanah Lot", groupSpec.pages[1].locationName)
+    assertEquals("Ubud Monkey Forest", groupSpec.pages[2].locationName)
+    assertTrue(groupSpec.pages[1].mediaItems.first().isVideo)
+
+    val singleSpec = PdfExporter.buildSingleVisitPdfSpec(
+      VisitMemoryItem(
+        kunjungan = kEarlyAfternoon,
+        trip = Trip(id = Trip.sharedTripUuid("bali"), name = "Bali 2026", isPersonal = false),
+        fotos = listOf(p1, v1)
+      )
+    )
+    assertEquals("Tanah Lot", singleSpec.coverTitle)
+    assertEquals(1, singleSpec.pages.size)
+    assertEquals(1, singleSpec.totalPhotos)
+    assertEquals(1, singleSpec.totalVideos)
+    assertTrue(singleSpec.suggestedFileName.startsWith("TripBuddy_"))
+    assertTrue(singleSpec.suggestedFileName.endsWith(".pdf"))
+  }
+
+  @Test
+  fun `TripAlarmScheduler computes H-1, 3h, 1h, and annual memory triggers accurately`() {
+    val visitDay = DateUtils.epochDayFromYmd(2026, 10, 20) // 20 Nov 2026
+    val beforeVisitNow = DateUtils.targetMillisForVisit(visitDay - 2L, 12, 0)
+
+    val hMinus1 = TripAlarmScheduler.computeReminderTriggerMillis(
+      visitDateEpochDay = visitDay,
+      visitHour = 14,
+      visitMinute = 30,
+      kind = ReminderKind.H_MINUS_1,
+      nowMillis = beforeVisitNow
+    )
+    assertEquals(DateUtils.targetMillisForVisit(visitDay - 1L, 9, 0), hMinus1)
+
+    val threeHours = TripAlarmScheduler.computeReminderTriggerMillis(
+      visitDateEpochDay = visitDay,
+      visitHour = 14,
+      visitMinute = 30,
+      kind = ReminderKind.THREE_HOURS_BEFORE,
+      nowMillis = beforeVisitNow
+    )
+    assertEquals(DateUtils.targetMillisForVisit(visitDay, 11, 30), threeHours)
+
+    val oneHour = TripAlarmScheduler.computeReminderTriggerMillis(
+      visitDateEpochDay = visitDay,
+      visitHour = 14,
+      visitMinute = 30,
+      kind = ReminderKind.ONE_HOUR_BEFORE,
+      nowMillis = beforeVisitNow
+    )
+    assertEquals(DateUtils.targetMillisForVisit(visitDay, 13, 30), oneHour)
+
+    val passedNow = DateUtils.targetMillisForVisit(visitDay, 15, 0)
+    assertNull(
+      TripAlarmScheduler.computeReminderTriggerMillis(
+        visitDateEpochDay = visitDay,
+        visitHour = 14,
+        visitMinute = 30,
+        kind = ReminderKind.ONE_HOUR_BEFORE,
+        nowMillis = passedNow
+      )
+    )
+
+    // Leap day Feb 29, 2024 clamps cleanly to Feb 28 in non-leap year 2026
+    val leapVisit = DateUtils.epochDayFromYmd(2024, 1, 29)
+    val jan2026Now = DateUtils.targetMillisForVisit(DateUtils.epochDayFromYmd(2026, 0, 15), 10, 0)
+    val nextAnnual = TripAlarmScheduler.computeNextAnnualMemoryTriggerMillis(leapVisit, jan2026Now)
+    assertEquals(
+      DateUtils.targetMillisForVisit(DateUtils.epochDayFromYmd(2026, 1, 28), 9, 0),
+      nextAnnual
+    )
+  }
+
+  @Test
+  fun `TripAlarmScheduler formats group, personal, and annual notification strings cleanly`() {
+    val (h1Title, h1Body) = TripAlarmScheduler.formatNotificationTitleAndBody(
+      kind = ReminderKind.H_MINUS_1,
+      locationName = "Tanah Lot",
+      timeLabel = "09:30",
+      groupOrSpaceLabel = "Bali 2026"
+    )
+    assertEquals("Pengingat Kunjungan Besok", h1Title)
+    assertEquals("Besok: Tanah Lot jam 09:30 - Bali 2026", h1Body)
+
+    val (oneHourTitle, oneHourBody) = TripAlarmScheduler.formatNotificationTitleAndBody(
+      kind = ReminderKind.ONE_HOUR_BEFORE,
+      locationName = "Kafe Senja",
+      timeLabel = "16:00",
+      groupOrSpaceLabel = ""
+    )
+    assertEquals("Pengingat 1 Jam Lagi", oneHourTitle)
+    assertEquals("1 jam lagi: Kafe Senja - Pribadi", oneHourBody)
+
+    val (annualTitle, annualBody) = TripAlarmScheduler.formatNotificationTitleAndBody(
+      kind = ReminderKind.ANNUAL_MEMORY,
+      locationName = "Gunung Bromo",
+      timeLabel = "05:00",
+      groupOrSpaceLabel = "Jawa Timur"
+    )
+    assertEquals("Kenangan TripBuddy", annualTitle)
+    assertEquals("Setahun lalu: Gunung Bromo", annualBody)
+
+    assertEquals(
+      setOf(ReminderTimingOption.H_MINUS_1, ReminderTimingOption.ONE_HOUR_BEFORE),
+      ReminderTimingOption.fromIds(null)
+    )
+    assertEquals(
+      setOf(ReminderTimingOption.THREE_HOURS_BEFORE),
+      ReminderTimingOption.fromIds(setOf("3_hours_before", "invalid"))
+    )
   }
 }
