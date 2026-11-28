@@ -1,6 +1,8 @@
 package com.example.ui
 
 import android.content.Context
+import android.content.Intent
+import android.content.IntentSender
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -17,10 +19,23 @@ import com.example.data.Foto
 import com.example.data.Kunjungan
 import com.example.data.Trip
 import com.example.data.TripRepository
+import com.example.drive.DriveAccountConnection
+import com.example.drive.DriveApiClient
+import com.example.drive.DriveAuthManager
+import com.example.drive.DriveAuthOutcome
+import com.example.drive.DriveBackupEngine
+import com.example.drive.DriveBackupLastStatus
+import com.example.drive.DriveBackupPreferences
+import com.example.drive.DriveBackupProgress
+import com.example.drive.DriveBackupScheduleSettings
+import com.example.drive.DriveBackupScheduler
+import com.example.drive.DriveRemoteBackupSummary
+import com.example.drive.DriveRestoreConfirmationSummary
 import com.example.notifications.AlarmScheduleResult
 import com.example.notifications.ReminderPreferences
 import com.example.notifications.ReminderTimingOption
 import com.example.notifications.TripAlarmScheduler
+import com.example.notifications.TripNotificationHelper
 import com.example.notifications.UserReminderSettings
 import com.example.ui.theme.AppThemeOption
 import com.example.ui.theme.ThemePreferences
@@ -171,7 +186,14 @@ private data class NavAndModalState(
     val pendingBackupImportSummary: BackupInspectionSummary? = null,
     val backupStatusDialogTitle: String? = null,
     val backupStatusDialogMessage: String? = null,
-    val backupStatusIsError: Boolean = false
+    val backupStatusIsError: Boolean = false,
+    val driveConnection: DriveAccountConnection = DriveAccountConnection(),
+    val driveScheduleSettings: DriveBackupScheduleSettings = DriveBackupScheduleSettings(),
+    val driveLastStatus: DriveBackupLastStatus = DriveBackupLastStatus(),
+    val isDriveActionLoading: Boolean = false,
+    val driveProgress: DriveBackupProgress? = null,
+    val availableDriveBackups: List<DriveRemoteBackupSummary>? = null,
+    val pendingDriveRestoreConfirm: DriveRestoreConfirmationSummary? = null
 )
 
 data class TripBuddyUiState(
@@ -244,7 +266,14 @@ data class TripBuddyUiState(
     val pendingBackupImportSummary: BackupInspectionSummary? = null,
     val backupStatusDialogTitle: String? = null,
     val backupStatusDialogMessage: String? = null,
-    val backupStatusIsError: Boolean = false
+    val backupStatusIsError: Boolean = false,
+    val driveConnection: DriveAccountConnection = DriveAccountConnection(),
+    val driveScheduleSettings: DriveBackupScheduleSettings = DriveBackupScheduleSettings(),
+    val driveLastStatus: DriveBackupLastStatus = DriveBackupLastStatus(),
+    val isDriveActionLoading: Boolean = false,
+    val driveProgress: DriveBackupProgress? = null,
+    val availableDriveBackups: List<DriveRemoteBackupSummary>? = null,
+    val pendingDriveRestoreConfirm: DriveRestoreConfirmationSummary? = null
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -268,6 +297,20 @@ class TripBuddyViewModel(
 
     private val _themeRestoredEvents = Channel<AppThemeOption>(Channel.BUFFERED)
     val themeRestoredEvents = _themeRestoredEvents.receiveAsFlow()
+
+    private val _driveConsentResolutionEvents = Channel<IntentSender>(Channel.BUFFERED)
+    val driveConsentResolutionEvents = _driveConsentResolutionEvents.receiveAsFlow()
+
+    private enum class PendingDriveAction {
+        CONNECT_ONLY,
+        BACKUP_NOW,
+        FETCH_VERSIONS_FOR_RESTORE,
+        INSPECT_VERSION,
+        RESTORE_SELECTED
+    }
+
+    private var pendingDriveAction: PendingDriveAction? = null
+    private var pendingDriveSummaryForAction: DriveRemoteBackupSummary? = null
 
     private val tickerMillis = flow {
         while (true) {
@@ -669,7 +712,14 @@ class TripBuddyViewModel(
             pendingBackupImportSummary = nav.pendingBackupImportSummary,
             backupStatusDialogTitle = nav.backupStatusDialogTitle,
             backupStatusDialogMessage = nav.backupStatusDialogMessage,
-            backupStatusIsError = nav.backupStatusIsError
+            backupStatusIsError = nav.backupStatusIsError,
+            driveConnection = nav.driveConnection,
+            driveScheduleSettings = nav.driveScheduleSettings,
+            driveLastStatus = nav.driveLastStatus,
+            isDriveActionLoading = nav.isDriveActionLoading,
+            driveProgress = nav.driveProgress,
+            availableDriveBackups = nav.availableDriveBackups,
+            pendingDriveRestoreConfirm = nav.pendingDriveRestoreConfirm
         )
     }.stateIn(
         scope = viewModelScope,
@@ -1015,9 +1065,401 @@ class TripBuddyViewModel(
         }
     }
 
+    fun refreshDriveBackupState(context: Context) {
+        val appContext = context.applicationContext
+        DriveBackupPreferences.setActiveUserId(appContext, currentUserId)
+        val connection = DriveBackupPreferences.loadConnection(appContext, currentUserId)
+        val schedule = DriveBackupPreferences.loadScheduleSettings(appContext, currentUserId)
+        val status = DriveBackupPreferences.loadLastStatus(appContext, currentUserId)
+        navAndModalState.update {
+            it.copy(
+                driveConnection = connection,
+                driveScheduleSettings = schedule,
+                driveLastStatus = status,
+                backupIncludeVideos = schedule.includeVideos
+            )
+        }
+    }
+
     fun setBackupIncludeVideos(context: Context, includeVideos: Boolean) {
-        navAndModalState.update { it.copy(backupIncludeVideos = includeVideos) }
-        refreshBackupEstimate(context, includeVideos)
+        val appContext = context.applicationContext
+        val updatedSchedule = navAndModalState.value.driveScheduleSettings.copy(includeVideos = includeVideos)
+        DriveBackupPreferences.saveScheduleSettings(appContext, currentUserId, updatedSchedule)
+        DriveBackupScheduler.syncSchedule(appContext, currentUserId)
+        navAndModalState.update {
+            it.copy(
+                backupIncludeVideos = includeVideos,
+                driveScheduleSettings = updatedSchedule
+            )
+        }
+        refreshBackupEstimate(appContext, includeVideos)
+    }
+
+    fun connectGoogleDrive(context: Context) {
+        authorizeDriveAndRun(context, PendingDriveAction.CONNECT_ONLY)
+    }
+
+    fun disconnectGoogleDrive(context: Context) {
+        if (navAndModalState.value.isDriveActionLoading || navAndModalState.value.driveProgress != null) return
+        val appContext = context.applicationContext
+        val previousEmail = navAndModalState.value.driveConnection.accountEmail.ifBlank { currentUserEmail }
+        navAndModalState.update { it.copy(isDriveActionLoading = true) }
+        viewModelScope.launch {
+            DriveAuthManager.revokeDriveAccess(appContext, previousEmail)
+            DriveBackupPreferences.saveConnection(appContext, currentUserId, DriveAccountConnection())
+            DriveBackupScheduler.cancelSchedule(appContext)
+            navAndModalState.update {
+                it.copy(
+                    isDriveActionLoading = false,
+                    driveConnection = DriveAccountConnection()
+                )
+            }
+            _snackbarEvents.trySend("Koneksi Google Drive diputuskan")
+        }
+    }
+
+    fun updateDriveScheduleSettings(context: Context, updated: DriveBackupScheduleSettings) {
+        val appContext = context.applicationContext
+        DriveBackupPreferences.saveScheduleSettings(appContext, currentUserId, updated)
+        DriveBackupScheduler.syncSchedule(appContext, currentUserId)
+        navAndModalState.update {
+            it.copy(
+                driveScheduleSettings = updated,
+                backupIncludeVideos = updated.includeVideos
+            )
+        }
+        refreshBackupEstimate(appContext, updated.includeVideos)
+    }
+
+    fun triggerDriveBackupNow(context: Context) {
+        authorizeDriveAndRun(context, PendingDriveAction.BACKUP_NOW)
+    }
+
+    fun openDriveRestorePicker(context: Context) {
+        authorizeDriveAndRun(context, PendingDriveAction.FETCH_VERSIONS_FOR_RESTORE)
+    }
+
+    fun dismissDriveVersionPicker() {
+        navAndModalState.update { it.copy(availableDriveBackups = null) }
+    }
+
+    fun selectDriveVersionToInspect(context: Context, summary: DriveRemoteBackupSummary) {
+        pendingDriveSummaryForAction = summary
+        navAndModalState.update { it.copy(availableDriveBackups = null) }
+        authorizeDriveAndRun(context, PendingDriveAction.INSPECT_VERSION)
+    }
+
+    fun dismissDriveRestoreConfirm() {
+        navAndModalState.update { it.copy(pendingDriveRestoreConfirm = null) }
+    }
+
+    fun confirmDriveRestore(context: Context) {
+        val confirm = navAndModalState.value.pendingDriveRestoreConfirm ?: return
+        pendingDriveSummaryForAction = confirm.remoteSummary
+        navAndModalState.update { it.copy(pendingDriveRestoreConfirm = null) }
+        authorizeDriveAndRun(context, PendingDriveAction.RESTORE_SELECTED)
+    }
+
+    fun onDriveConsentActivityResult(context: Context, isOk: Boolean, data: Intent?) {
+        val action = pendingDriveAction
+        pendingDriveAction = null
+        val appContext = context.applicationContext
+        if (!isOk) {
+            navAndModalState.update { it.copy(isDriveActionLoading = false) }
+            _snackbarEvents.trySend("Izin Google Drive dibatalkan.")
+            return
+        }
+        val preferredEmail = navAndModalState.value.driveConnection.accountEmail.ifBlank { currentUserEmail }
+        when (val outcome = DriveAuthManager.extractAuthorizationFromIntent(appContext, data, preferredEmail)) {
+            is DriveAuthOutcome.Authorized -> {
+                if (action != null) {
+                    viewModelScope.launch {
+                        handleDriveAuthorized(appContext, outcome, action)
+                    }
+                } else {
+                    navAndModalState.update { it.copy(isDriveActionLoading = false) }
+                }
+            }
+            is DriveAuthOutcome.NeedsResolution -> {
+                navAndModalState.update { it.copy(isDriveActionLoading = false) }
+                _snackbarEvents.trySend("Izin Google Drive belum selesai diberikan.")
+            }
+            is DriveAuthOutcome.Failed -> {
+                navAndModalState.update {
+                    it.copy(
+                        isDriveActionLoading = false,
+                        backupStatusDialogTitle = "Gagal Menghubungkan Drive",
+                        backupStatusDialogMessage = outcome.message,
+                        backupStatusIsError = true
+                    )
+                }
+            }
+        }
+    }
+
+    private fun authorizeDriveAndRun(context: Context, action: PendingDriveAction) {
+        if (navAndModalState.value.isDriveActionLoading || navAndModalState.value.driveProgress != null) return
+        val appContext = context.applicationContext
+        val preferredEmail = navAndModalState.value.driveConnection.accountEmail.ifBlank { currentUserEmail }
+        navAndModalState.update { it.copy(isDriveActionLoading = true) }
+
+        viewModelScope.launch {
+            when (val outcome = DriveAuthManager.authorizeDriveAccess(appContext, preferredEmail)) {
+                is DriveAuthOutcome.Authorized -> {
+                    handleDriveAuthorized(appContext, outcome, action)
+                }
+                is DriveAuthOutcome.NeedsResolution -> {
+                    pendingDriveAction = action
+                    _driveConsentResolutionEvents.trySend(outcome.intentSender)
+                }
+                is DriveAuthOutcome.Failed -> {
+                    navAndModalState.update {
+                        it.copy(
+                            isDriveActionLoading = false,
+                            backupStatusDialogTitle = "Izin Google Drive Gagal",
+                            backupStatusDialogMessage = outcome.message,
+                            backupStatusIsError = true
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun handleDriveAuthorized(
+        appContext: Context,
+        auth: DriveAuthOutcome.Authorized,
+        action: PendingDriveAction
+    ) {
+        val currentConn = DriveBackupPreferences.loadConnection(appContext, currentUserId)
+        val profile = if (!currentConn.isConnected || currentConn.accountEmail.isBlank()) {
+            withContext(Dispatchers.IO) {
+                runCatching { DriveApiClient.fetchUserAbout(auth.accessToken) }.getOrNull()
+            }
+        } else null
+
+        val resolvedEmail = profile?.email?.takeIf { it.isNotBlank() }
+            ?: auth.accountEmail.takeIf { it.isNotBlank() }
+            ?: currentConn.accountEmail.takeIf { it.isNotBlank() }
+            ?: currentUserEmail
+        val resolvedName = profile?.displayName?.takeIf { it.isNotBlank() }
+            ?: auth.accountName.takeIf { it.isNotBlank() }
+            ?: currentConn.accountName.takeIf { it.isNotBlank() }
+            ?: currentUserName
+
+        val updatedConnection = DriveAccountConnection(
+            isConnected = true,
+            accountEmail = resolvedEmail,
+            accountName = resolvedName,
+            connectedAtMillis = if (currentConn.isConnected && currentConn.connectedAtMillis > 0L) {
+                currentConn.connectedAtMillis
+            } else {
+                System.currentTimeMillis()
+            }
+        )
+        DriveBackupPreferences.saveConnection(appContext, currentUserId, updatedConnection)
+        DriveBackupScheduler.syncSchedule(appContext, currentUserId)
+        navAndModalState.update { it.copy(driveConnection = updatedConnection) }
+
+        when (action) {
+            PendingDriveAction.CONNECT_ONLY -> {
+                navAndModalState.update { it.copy(isDriveActionLoading = false) }
+                _snackbarEvents.trySend("Google Drive terhubung (${resolvedEmail.ifBlank { resolvedName }})")
+            }
+
+            PendingDriveAction.BACKUP_NOW -> {
+                navAndModalState.update {
+                    it.copy(
+                        isDriveActionLoading = false,
+                        driveProgress = DriveBackupProgress(
+                            isRestore = false,
+                            stepLabel = "Menyiapkan cadangan ke Google Drive...",
+                            processedFiles = 0,
+                            totalFiles = 1,
+                            processedBytes = 0L,
+                            totalBytes = 0L
+                        )
+                    )
+                }
+                val includeVideos = navAndModalState.value.driveScheduleSettings.includeVideos
+                val backupResult = withContext(Dispatchers.IO) {
+                    DriveBackupEngine.performIncrementalBackup(
+                        context = appContext,
+                        userId = currentUserId,
+                        accessToken = auth.accessToken,
+                        localRepository = localRepository,
+                        includeVideos = includeVideos,
+                        onProgress = { progress ->
+                            navAndModalState.update { state -> state.copy(driveProgress = progress) }
+                        }
+                    )
+                }
+                val latestStatus = DriveBackupPreferences.loadLastStatus(appContext, currentUserId)
+                backupResult.onSuccess { exec ->
+                    val sizeText = BackupManager.formatByteSize(exec.totalBackupSizeBytes)
+                    TripNotificationHelper.showDriveBackupSuccessNotification(
+                        context = appContext,
+                        uploadedFilesCount = exec.uploadedFilesCount,
+                        totalSizeFormatted = sizeText
+                    )
+                    navAndModalState.update {
+                        it.copy(
+                            driveProgress = null,
+                            driveLastStatus = latestStatus,
+                            backupStatusDialogTitle = "Cadangan Drive Berhasil",
+                            backupStatusDialogMessage = if (exec.uploadedFilesCount > 0) {
+                                "${exec.uploadedFilesCount} file media baru diunggah dan ${exec.reusedFilesCount} file yang tidak berubah dilewati.\n\nTotal ukuran cadangan: $sizeText."
+                            } else {
+                                "Data pribadi berhasil dicadangkan ke folder \"TripBuddy Backup\" ($sizeText). Semua ${exec.reusedFilesCount} media sudah mutakhir."
+                            },
+                            backupStatusIsError = false
+                        )
+                    }
+                }.onFailure { err ->
+                    if (latestStatus.consecutiveFailures >= 3) {
+                        TripNotificationHelper.showDriveBackupFailureWarningNotification(
+                            context = appContext,
+                            consecutiveFailures = latestStatus.consecutiveFailures,
+                            reason = err.localizedMessage ?: latestStatus.lastErrorMessage
+                        )
+                    }
+                    navAndModalState.update {
+                        it.copy(
+                            driveProgress = null,
+                            driveLastStatus = latestStatus,
+                            backupStatusDialogTitle = "Cadangan Drive Gagal",
+                            backupStatusDialogMessage = err.localizedMessage
+                                ?: "Gagal mencadangkan ke Google Drive. Unggahan yang terputus akan dilanjutkan pada percobaan berikutnya.",
+                            backupStatusIsError = true
+                        )
+                    }
+                }
+            }
+
+            PendingDriveAction.FETCH_VERSIONS_FOR_RESTORE -> {
+                val listResult = withContext(Dispatchers.IO) {
+                    DriveBackupEngine.fetchAvailableDriveBackups(auth.accessToken)
+                }
+                listResult.onSuccess { versions ->
+                    navAndModalState.update {
+                        it.copy(
+                            isDriveActionLoading = false,
+                            availableDriveBackups = versions
+                        )
+                    }
+                }.onFailure { err ->
+                    navAndModalState.update {
+                        it.copy(
+                            isDriveActionLoading = false,
+                            backupStatusDialogTitle = "Gagal Membaca Cadangan Drive",
+                            backupStatusDialogMessage = err.localizedMessage
+                                ?: "Tidak dapat mengambil daftar cadangan di folder TripBuddy Backup.",
+                            backupStatusIsError = true
+                        )
+                    }
+                }
+            }
+
+            PendingDriveAction.INSPECT_VERSION -> {
+                val summary = pendingDriveSummaryForAction
+                pendingDriveSummaryForAction = null
+                if (summary == null) {
+                    navAndModalState.update { it.copy(isDriveActionLoading = false) }
+                    return
+                }
+                val inspectResult = withContext(Dispatchers.IO) {
+                    DriveBackupEngine.inspectDriveBackupForRestore(
+                        context = appContext,
+                        accessToken = auth.accessToken,
+                        summary = summary,
+                        localRepository = localRepository
+                    )
+                }
+                inspectResult.onSuccess { confirmSummary ->
+                    navAndModalState.update {
+                        it.copy(
+                            isDriveActionLoading = false,
+                            pendingDriveRestoreConfirm = confirmSummary
+                        )
+                    }
+                }.onFailure { err ->
+                    navAndModalState.update {
+                        it.copy(
+                            isDriveActionLoading = false,
+                            backupStatusDialogTitle = "Gagal Memeriksa Cadangan",
+                            backupStatusDialogMessage = err.localizedMessage
+                                ?: "File cadangan di Drive tidak dapat dibaca.",
+                            backupStatusIsError = true
+                        )
+                    }
+                }
+            }
+
+            PendingDriveAction.RESTORE_SELECTED -> {
+                val summary = pendingDriveSummaryForAction
+                pendingDriveSummaryForAction = null
+                if (summary == null) {
+                    navAndModalState.update { it.copy(isDriveActionLoading = false) }
+                    return
+                }
+                navAndModalState.update {
+                    it.copy(
+                        isDriveActionLoading = false,
+                        driveProgress = DriveBackupProgress(
+                            isRestore = true,
+                            stepLabel = "Memulai pemulihan dari Google Drive...",
+                            processedFiles = 0,
+                            totalFiles = summary.manifest.mediaFiles.size + 1,
+                            processedBytes = 0L,
+                            totalBytes = summary.manifest.totalMediaBytes
+                        )
+                    )
+                }
+                val restoreResult = withContext(Dispatchers.IO) {
+                    DriveBackupEngine.restoreFromDriveBackup(
+                        context = appContext,
+                        userId = currentUserId,
+                        accessToken = auth.accessToken,
+                        localRepository = localRepository,
+                        summary = summary,
+                        onProgress = { progress ->
+                            navAndModalState.update { state -> state.copy(driveProgress = progress) }
+                        }
+                    )
+                }
+                restoreResult.onSuccess { res ->
+                    navAndModalState.update {
+                        it.copy(
+                            driveProgress = null,
+                            reminderSettings = res.restoredReminderSettings,
+                            backupStatusDialogTitle = "Pemulihan Drive Selesai",
+                            backupStatusDialogMessage = buildString {
+                                append("Berhasil memulihkan ")
+                                append("${res.restoredKunjunganCount} kunjungan pribadi, ")
+                                append("${res.restoredFotoCount} entri media (${res.downloadedMediaCount} file diunduh), dan pengaturan aplikasi.")
+                                if (res.skippedKunjunganCount > 0 || res.skippedFotoCount > 0) {
+                                    append("\n\n${res.skippedKunjunganCount} kunjungan dan ${res.skippedFotoCount} media yang sudah ada di perangkat dilewati tanpa duplikasi.")
+                                }
+                            },
+                            backupStatusIsError = false
+                        )
+                    }
+                    _themeRestoredEvents.trySend(res.restoredTheme)
+                    rescheduleAllLocalReminders()
+                    refreshBackupEstimate(appContext)
+                }.onFailure { err ->
+                    navAndModalState.update {
+                        it.copy(
+                            driveProgress = null,
+                            backupStatusDialogTitle = "Pemulihan Drive Gagal",
+                            backupStatusDialogMessage = err.localizedMessage
+                                ?: "Terjadi kesalahan saat memulihkan data dari Google Drive.",
+                            backupStatusIsError = true
+                        )
+                    }
+                }
+            }
+        }
     }
 
     fun refreshBackupEstimate(

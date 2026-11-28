@@ -4,6 +4,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.example.data.TripBuddyDatabase
+import com.example.drive.DriveBackupPreferences
+import com.example.drive.DriveBackupScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -32,6 +34,10 @@ class BootRescheduleReceiver : BroadcastReceiver() {
                     visits = allVisits,
                     tripsById = tripsById,
                     settings = settings
+                )
+                DriveBackupScheduler.syncSchedule(
+                    context = appContext,
+                    userId = DriveBackupPreferences.getActiveUserId(appContext)
                 )
             } finally {
                 pendingResult.finish()

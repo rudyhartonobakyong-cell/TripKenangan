@@ -7,6 +7,14 @@ import com.example.collab.SharedVisit
 import com.example.data.Foto
 import com.example.data.Kunjungan
 import com.example.data.Trip
+import com.example.drive.DriveBackupFrequency
+import com.example.drive.DriveBackupManifest
+import com.example.drive.DriveBackupModels
+import com.example.drive.DriveBackupScheduleSettings
+import com.example.drive.DriveBackupScheduler
+import com.example.drive.DriveMediaManifestEntry
+import com.example.drive.DriveRemoteBackupSummary
+import com.example.drive.LocalMediaFileCandidate
 import com.example.notifications.ReminderKind
 import com.example.notifications.ReminderTimingOption
 import com.example.notifications.TripAlarmScheduler
@@ -933,5 +941,170 @@ class ExampleUnitTest {
       destFilesDir.deleteRecursively()
       zipDir.deleteRecursively()
     }
+  }
+
+  @Test
+  fun `DriveBackupModels round-trips manifest, computes SHA-256, plans incremental diff, and enforces 3-version retention`() {
+    val tmpDir = Files.createTempDirectory("tb_drive_test").toFile()
+    try {
+      val f1 = File(tmpDir, "photo1.jpg").apply { writeBytes("photo-one-bytes".toByteArray()) }
+      val f2 = File(tmpDir, "photo2.jpg").apply { writeBytes("photo-two-updated".toByteArray()) }
+      val f3 = File(tmpDir, "video3.mp4").apply { writeBytes("video-three-new".toByteArray()) }
+
+      val sha1 = DriveBackupModels.computeSha256(f1)
+      val sha2 = DriveBackupModels.computeSha256(f2)
+      val sha3 = DriveBackupModels.computeSha256(f3)
+      assertEquals(64, sha1.length)
+      assertNotEquals(sha1, sha2)
+
+      val entry1Prev = DriveMediaManifestEntry(
+        relativePath = "fotos/t/k/photo1.jpg",
+        driveFileId = "drive_m1",
+        sizeBytes = f1.length(),
+        lastModifiedMillis = 100L,
+        sha256 = sha1,
+        isVideo = false
+      )
+      val entry2Old = DriveMediaManifestEntry(
+        relativePath = "fotos/t/k/photo2.jpg",
+        driveFileId = "drive_m2_old",
+        sizeBytes = 5L,
+        lastModifiedMillis = 100L,
+        sha256 = "oldhash",
+        isVideo = false
+      )
+      val entryMissingRemote = DriveMediaManifestEntry(
+        relativePath = "fotos/t/k/missing.jpg",
+        driveFileId = "drive_deleted_remotely",
+        sizeBytes = f1.length(),
+        lastModifiedMillis = 100L,
+        sha256 = sha1,
+        isVideo = false
+      )
+
+      val prevManifest = DriveBackupManifest(
+        createdAtMillis = 1_764_000_000_000L,
+        includesVideos = true,
+        kunjunganCount = 2,
+        memoryCount = 1,
+        photoCount = 2,
+        videoCount = 0,
+        totalMediaBytes = 100L,
+        dataFileId = "drive_data_prev",
+        dataSha256 = "datasha",
+        mediaFiles = listOf(entry1Prev, entry2Old, entryMissingRemote)
+      )
+
+      val encoded = DriveBackupModels.encodeDriveManifestJson(prevManifest)
+      val decoded = DriveBackupModels.parseDriveManifestJson(encoded)
+      assertEquals(prevManifest.createdAtMillis, decoded.createdAtMillis)
+      assertEquals("drive_data_prev", decoded.dataFileId)
+      assertEquals(3, decoded.mediaFiles.size)
+      assertEquals("drive_m1", decoded.mediaFiles[0].driveFileId)
+
+      val localCandidates = listOf(
+        LocalMediaFileCandidate(f1, "fotos/t/k/photo1.jpg", f1.length(), 100L, sha1, false),
+        LocalMediaFileCandidate(f2, "fotos/t/k/photo2.jpg", f2.length(), 200L, sha2, false),
+        LocalMediaFileCandidate(f3, "fotos/t/k/video3.mp4", f3.length(), 300L, sha3, true)
+      )
+      val plan = DriveBackupModels.planIncrementalMediaUpload(
+        localFiles = localCandidates,
+        previousManifest = decoded,
+        existingRemoteMediaFileIds = setOf("drive_m1", "drive_m2_old")
+      )
+      assertEquals(listOf("drive_m1"), plan.reusedEntries.map { it.driveFileId })
+      assertEquals(
+        listOf("fotos/t/k/photo2.jpg", "fotos/t/k/video3.mp4"),
+        plan.filesToUpload.map { it.relativePath }
+      )
+
+      // 4 manifest versions -> keep newest 3, delete 4th manifest + orphaned data + orphaned media
+      fun mkSummary(ver: Long, dataId: String, mediaIds: List<String>) = DriveRemoteBackupSummary(
+        manifestFileId = "man_$ver",
+        fileName = "tripbuddy_manifest_$ver.json",
+        manifest = DriveBackupManifest(
+          createdAtMillis = ver,
+          includesVideos = true,
+          kunjunganCount = 1,
+          memoryCount = 1,
+          photoCount = mediaIds.size,
+          videoCount = 0,
+          totalMediaBytes = 10L,
+          dataFileId = dataId,
+          dataSha256 = "s$ver",
+          mediaFiles = mediaIds.map { mid ->
+            DriveMediaManifestEntry("fotos/$mid.jpg", mid, 10L, ver, "h", false)
+          }
+        )
+      )
+
+      val v4 = mkSummary(400L, "data_4", listOf("m_shared", "m_v4"))
+      val v3 = mkSummary(300L, "data_3", listOf("m_shared"))
+      val v2 = mkSummary(200L, "data_2", listOf("m_v2"))
+      val v1 = mkSummary(100L, "data_1", listOf("m_v1_orphan"))
+
+      val retention = DriveBackupModels.selectRetentionDeletions(
+        manifestsNewestFirst = listOf(v4, v3, v2, v1),
+        allRemoteMediaFileIds = setOf("m_shared", "m_v4", "m_v2", "m_v1_orphan", "m_abandoned"),
+        allRemoteDataFileIds = setOf("data_4", "data_3", "data_2", "data_1"),
+        maxVersions = 3
+      )
+      assertEquals(listOf("man_400", "man_300", "man_200"), retention.keptManifests.map { it.manifestFileId })
+      assertEquals(listOf("man_100"), retention.manifestIdsToDelete)
+      assertEquals(listOf("data_1"), retention.dataFileIdsToDelete)
+      assertEquals(listOf("m_v1_orphan", "m_abandoned"), retention.mediaFileIdsToDelete)
+    } finally {
+      tmpDir.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `DriveBackupScheduler computes DAILY, WEEKLY, and MONTHLY initial delays accurately`() {
+    val nov28 = DateUtils.epochDayFromYmd(2026, 10, 28) // Saturday, 28 Nov 2026
+    val now10am = DateUtils.targetMillisForVisit(nov28, 10, 0)
+
+    val offDelay = DriveBackupScheduler.computeInitialDelayMillis(
+      DriveBackupScheduleSettings(frequency = DriveBackupFrequency.OFF),
+      now10am
+    )
+    assertEquals(0L, offDelay)
+
+    // DAILY at 02:00 when now is 10:00 -> next day 02:00 (+16 hours)
+    val dailyDelay = DriveBackupScheduler.computeInitialDelayMillis(
+      DriveBackupScheduleSettings(frequency = DriveBackupFrequency.DAILY, hour = 2, minute = 0),
+      now10am
+    )
+    assertEquals(16L * 60L * 60L * 1000L, dailyDelay)
+
+    // DAILY at 23:00 same day when now is 10:00 -> +13 hours
+    val dailyLaterSameDay = DriveBackupScheduler.computeInitialDelayMillis(
+      DriveBackupScheduleSettings(frequency = DriveBackupFrequency.DAILY, hour = 23, minute = 0),
+      now10am
+    )
+    assertEquals(13L * 60L * 60L * 1000L, dailyLaterSameDay)
+
+    // WEEKLY on Sunday at 02:00 when now is Saturday 10:00 -> next day 02:00 (+16 hours)
+    val weeklyDelay = DriveBackupScheduler.computeInitialDelayMillis(
+      DriveBackupScheduleSettings(
+        frequency = DriveBackupFrequency.WEEKLY,
+        dayOfWeek = java.util.Calendar.SUNDAY,
+        hour = 2,
+        minute = 0
+      ),
+      now10am
+    )
+    assertEquals(16L * 60L * 60L * 1000L, weeklyDelay)
+
+    // MONTHLY on 1st at 02:00 when now is Nov 28 10:00 -> Dec 1 02:00 (2 days + 16 hours)
+    val monthlyDelay = DriveBackupScheduler.computeInitialDelayMillis(
+      DriveBackupScheduleSettings(
+        frequency = DriveBackupFrequency.MONTHLY,
+        dayOfMonth = 1,
+        hour = 2,
+        minute = 0
+      ),
+      now10am
+    )
+    assertEquals((2L * 24L + 16L) * 60L * 60L * 1000L, monthlyDelay)
   }
 }

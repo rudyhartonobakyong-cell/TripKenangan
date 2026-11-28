@@ -13,6 +13,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -95,6 +96,7 @@ import com.example.collab.CollabRepository
 import com.example.data.Trip
 import com.example.data.TripBuddyDatabase
 import com.example.data.TripRepository
+import com.example.drive.DriveBackupScheduler
 import com.example.notifications.TripAlarmScheduler
 import com.example.notifications.TripNotificationHelper
 import com.example.ui.DisplayVisit
@@ -110,6 +112,9 @@ import com.example.ui.components.CameraCaptureModeDialog
 import com.example.ui.components.CameraVisitPickerDialog
 import com.example.ui.components.CollabWorkspaceBar
 import com.example.ui.components.CreateSharedTripDialog
+import com.example.ui.components.DriveBackupProgressDialog
+import com.example.ui.components.DriveBackupVersionPickerDialog
+import com.example.ui.components.DriveRestoreConfirmDialog
 import com.example.ui.components.InviteMemberSheet
 import com.example.ui.components.JoinTripByCodeDialog
 import com.example.ui.components.MapsSearchSheet
@@ -290,11 +295,12 @@ fun TripBuddyApp(
     var showNotificationRationaleDialog by remember { mutableStateOf(false) }
     var showExactAlarmRationaleDialog by remember { mutableStateOf(false) }
 
-    DisposableEffect(lifecycleOwner, context) {
+    DisposableEffect(lifecycleOwner, context, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 hasNotificationPermission = TripNotificationHelper.hasNotificationPermission(context)
                 canScheduleExactAlarms = alarmScheduler.canScheduleExactAlarms()
+                viewModel.refreshDriveBackupState(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -462,6 +468,32 @@ fun TripBuddyApp(
         }
     }
 
+    val driveConsentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        viewModel.onDriveConsentActivityResult(
+            context = context,
+            isOk = result.resultCode == Activity.RESULT_OK,
+            data = result.data
+        )
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.refreshDriveBackupState(context)
+        DriveBackupScheduler.syncSchedule(context, viewModel.uiState.value.currentUserId)
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.driveConsentResolutionEvents.collect { intentSender ->
+            try {
+                driveConsentLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
+            } catch (e: Exception) {
+                viewModel.onDriveConsentActivityResult(context, false, null)
+                showMessage("Gagal membuka dialog izin Google Drive: ${e.localizedMessage ?: "terjadi kesalahan"}")
+            }
+        }
+    }
+
     LaunchedEffect(viewModel) {
         viewModel.snackbarEvents.collect { msg ->
             snackbarHostState.showSnackbar(msg)
@@ -496,6 +528,7 @@ fun TripBuddyApp(
 
     LaunchedEffect(uiState.showAccountSheet, uiState.backupIncludeVideos) {
         if (uiState.showAccountSheet) {
+            viewModel.refreshDriveBackupState(context)
             viewModel.refreshBackupEstimate(context, uiState.backupIncludeVideos)
         }
     }
@@ -1019,10 +1052,19 @@ fun TripBuddyApp(
             backupIncludeVideos = uiState.backupIncludeVideos,
             backupEstimate = uiState.backupEstimate,
             isEstimatingBackup = uiState.isEstimatingBackup,
-            isBackupBusy = uiState.backupProgress != null,
+            isBackupBusy = uiState.backupProgress != null || uiState.driveProgress != null,
+            driveConnection = uiState.driveConnection,
+            driveSchedule = uiState.driveScheduleSettings,
+            driveLastStatus = uiState.driveLastStatus,
+            isDriveActionLoading = uiState.isDriveActionLoading,
             onToggleBackupIncludeVideos = { include ->
                 viewModel.setBackupIncludeVideos(context, include)
             },
+            onConnectDriveClick = { viewModel.connectGoogleDrive(context) },
+            onDisconnectDriveClick = { viewModel.disconnectGoogleDrive(context) },
+            onUpdateDriveSchedule = { updated -> viewModel.updateDriveScheduleSettings(context, updated) },
+            onDriveBackupNowClick = { viewModel.triggerDriveBackupNow(context) },
+            onDriveRestoreClick = { viewModel.openDriveRestorePicker(context) },
             onExportBackupClick = {
                 viewModel.exportPersonalBackup(context)
             },
@@ -1038,6 +1080,7 @@ fun TripBuddyApp(
             onJoinTripClick = { viewModel.openJoinTripDialog() },
             onTestFirestoreConnection = viewModel::testFirestoreConnection,
             onSignOutClick = {
+                DriveBackupScheduler.cancelSchedule(context)
                 signOutFromGoogle(
                     credentialManager = credentialManager,
                     scope = coroutineScope
@@ -1048,6 +1091,26 @@ fun TripBuddyApp(
 
     uiState.backupProgress?.let { progress ->
         BackupProgressDialog(progress = progress)
+    }
+
+    uiState.driveProgress?.let { progress ->
+        DriveBackupProgressDialog(progress = progress)
+    }
+
+    uiState.availableDriveBackups?.let { versions ->
+        DriveBackupVersionPickerDialog(
+            versions = versions,
+            onSelectVersion = { chosen -> viewModel.selectDriveVersionToInspect(context, chosen) },
+            onDismiss = viewModel::dismissDriveVersionPicker
+        )
+    }
+
+    uiState.pendingDriveRestoreConfirm?.let { confirmSummary ->
+        DriveRestoreConfirmDialog(
+            summary = confirmSummary,
+            onConfirm = { viewModel.confirmDriveRestore(context) },
+            onDismiss = viewModel::dismissDriveRestoreConfirm
+        )
     }
 
     uiState.pendingBackupImportSummary?.let { summary ->

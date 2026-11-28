@@ -72,6 +72,9 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.collab.FirestoreConnectionTestResult
 import com.example.collab.SharedTrip
+import com.example.drive.DriveAccountConnection
+import com.example.drive.DriveBackupLastStatus
+import com.example.drive.DriveBackupScheduleSettings
 import com.example.notifications.ReminderTimingOption
 import com.example.notifications.UserReminderSettings
 import com.example.ui.theme.AppThemeOption
@@ -392,7 +395,16 @@ fun AccountProfileSheet(
     backupEstimate: BackupEstimate?,
     isEstimatingBackup: Boolean,
     isBackupBusy: Boolean,
+    driveConnection: DriveAccountConnection,
+    driveSchedule: DriveBackupScheduleSettings,
+    driveLastStatus: DriveBackupLastStatus,
+    isDriveActionLoading: Boolean,
     onToggleBackupIncludeVideos: (Boolean) -> Unit,
+    onConnectDriveClick: () -> Unit,
+    onDisconnectDriveClick: () -> Unit,
+    onUpdateDriveSchedule: (DriveBackupScheduleSettings) -> Unit,
+    onDriveBackupNowClick: () -> Unit,
+    onDriveRestoreClick: () -> Unit,
     onExportBackupClick: () -> Unit,
     onImportBackupClick: () -> Unit,
     projectId: String,
@@ -505,7 +517,17 @@ fun AccountProfileSheet(
                 estimate = backupEstimate,
                 isEstimating = isEstimatingBackup,
                 isBusy = isBackupBusy,
+                driveConnection = driveConnection,
+                driveSchedule = driveSchedule,
+                driveLastStatus = driveLastStatus,
+                isDriveActionLoading = isDriveActionLoading,
                 onToggleIncludeVideos = onToggleBackupIncludeVideos,
+                onConnectDriveClick = onConnectDriveClick,
+                onDisconnectDriveClick = onDisconnectDriveClick,
+                onUpdateDriveSchedule = onUpdateDriveSchedule,
+                onDriveBackupNowClick = onDriveBackupNowClick,
+                onDriveRestoreClick = onDriveRestoreClick,
+                onOpenBatteryAppInfo = onOpenBatteryAppInfo,
                 onExportClick = onExportBackupClick,
                 onImportClick = onImportBackupClick
             )
